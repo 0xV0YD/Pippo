@@ -83,8 +83,11 @@ Rules:
 class BotConfig:
     telegram_bot_token: str
     telegram_allowed_chat_id: int | None
+    ai_provider: str
     gemini_api_key: str
     gemini_model: str
+    openai_api_key: str
+    openai_model: str
 
 
 LINEAR_STATE_ALIASES = {
@@ -139,25 +142,34 @@ def load_config() -> BotConfig:
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+    ai_provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
     missing = [
         name
         for name, value in [
             ("TELEGRAM_BOT_TOKEN", token),
-            ("GEMINI_API_KEY", gemini_api_key),
         ]
         if not value
     ]
+    if ai_provider == "gemini" and not gemini_api_key:
+        missing.append("GEMINI_API_KEY")
+    if ai_provider == "openai" and not openai_api_key:
+        missing.append("OPENAI_API_KEY")
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     return BotConfig(
         telegram_bot_token=token,
         telegram_allowed_chat_id=int(chat_id) if chat_id else None,
+        ai_provider=ai_provider,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
     )
 
 
@@ -192,6 +204,73 @@ def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
         raise ValueError("Gemini returned an empty response")
 
     return json.loads(text)
+
+
+def raise_for_status_with_body(response: requests.Response, provider_name: str) -> None:
+    if response.ok:
+        return
+    try:
+        payload = response.json()
+    except Exception:
+        payload = response.text
+    raise ValueError(f"{provider_name} API error ({response.status_code}): {payload}")
+
+
+def extract_openai_text(payload: dict) -> str:
+    if payload.get("output_text"):
+        return payload["output_text"]
+
+    parts = []
+    for item in payload.get("output", []):
+        for content in item.get("content", []):
+            text = content.get("text")
+            if text:
+                parts.append(text)
+    return "".join(parts).strip()
+
+
+def call_openai_for_action(config: BotConfig, user_message: str) -> dict:
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {config.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": config.openai_model,
+            "instructions": SYSTEM_PROMPT,
+            "input": f"Return JSON only.\nUser message:\n{user_message}",
+            "text": {
+                "format": {
+                    "type": "json_object"
+                }
+            },
+        },
+        timeout=60,
+    )
+    raise_for_status_with_body(response, "OpenAI")
+    payload = response.json()
+    text = extract_openai_text(payload)
+    if not text:
+        raise ValueError("OpenAI returned an empty response")
+    return json.loads(text)
+
+
+def call_ai_for_action(config: BotConfig, user_message: str) -> dict:
+    if config.ai_provider == "openai":
+        try:
+            return call_openai_for_action(config, user_message)
+        except Exception as exc:
+            if config.gemini_api_key and any(
+                marker in str(exc).lower()
+                for marker in ["429", "insufficient_quota", "rate limit", "quota"]
+            ):
+                logger.warning("OpenAI failed, falling back to Gemini: %s", exc)
+                return call_gemini_for_action(config, user_message)
+            raise
+    if config.ai_provider == "gemini":
+        return call_gemini_for_action(config, user_message)
+    raise ValueError(f"Unsupported AI_PROVIDER: {config.ai_provider}")
 
 
 def parse_linear_filters(user_message: str, last_issue_id: str | None = None) -> dict | None:
@@ -434,7 +513,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context,
                 update.effective_chat.id if update.effective_chat else None,
             ),
-        ) or call_gemini_for_action(config, message.text)
+        ) or call_ai_for_action(config, message.text)
         action = parsed.get("action")
 
         if action == "needs_clarification":
@@ -455,7 +534,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Title: {event['title']}\n"
                 f"Start: {event['start']}\n"
                 f"Attendees: {event['attendee_count']}\n"
-                f"Link: {event['link']}"
+                f"Calendar Link: {event['link']}\n"
+                f"Meet Link: {event['meet_link']}"
             )
             return
 
