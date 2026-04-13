@@ -19,6 +19,10 @@ All from Telegram. No tab chaos. No context-switch speedrun. No corporate suffer
 - Schedules Google Calendar events from Telegram
 - Supports multiple Google accounts
 - Lets you switch active calendar identity with buttons
+- Lists today's meetings
+- Finds free slots on your calendar
+- Expands saved group names into attendee lists
+- Creates Google Meet links automatically
 - Current account labels:
   - `Personal Yash`
   - `Pro Yash`
@@ -29,9 +33,19 @@ All from Telegram. No tab chaos. No context-switch speedrun. No corporate suffer
 - Filters issues by team and state
 - Creates issues
 - Updates issue status
-- Updates issue labels
+- Assigns issues to people
+- Adds and removes labels
 - Updates issue project
 - Understands follow-ups like `this issue`
+
+### Memory mode
+- Saves members with names, emails, and aliases
+- Saves reusable groups like `infra`
+- Lets you inspect members and groups from Telegram
+
+### Safety mode
+- Locks the bot so only `@OxVoyd` can use it
+- Asks for `Confirm / Cancel` before risky actions run
 
 ### MCP mode
 - Exposes reusable tools through your local MCP server
@@ -48,17 +62,23 @@ Which means the bot can:
 - talk like a normal assistant
 - execute real actions
 - remember which calendar account you selected
+- remember saved members and groups
 - carry issue context for follow-up Linear actions
+- ask for confirmation before high-impact actions
 
 It is giving "executive assistant with sleeper-build anime sidekick" and honestly that is correct.
 
 ## Commands You Can Actually Try
 
 ### Calendar
-- `schedule a meet at 3pm IST tomorrow with akshat@anthias.xyz named Monitoring Sync`
-- `create a meeting on Pro Yash calendar with yash@anthias.xyz and vansh@anthias.xyz`
+- `/help`
 - `/start`
 - `/accounts`
+- `list today's meetings`
+- `find free slots today`
+- `find free slots on 2026-04-14 for 30 minutes`
+- `schedule a meet at 3pm IST tomorrow with akshat named Monitoring Sync`
+- `schedule a sync with infra tomorrow at 4pm IST named Infra Sync`
 
 ### Linear
 - `show my linear orgs`
@@ -67,12 +87,23 @@ It is giving "executive assistant with sleeper-build anime sidekick" and honestl
 - `list done issues in Anthias`
 - `create a linear issue in ANT titled Fix dashboard issue`
 - `create an issue with heading "Fixing Dashboard issues" and assign it to me in my org ANT`
+- `assign ANT-147 to akshat`
 - `change ANT-147 to in progress`
 - `move this issue to done`
 - `add label bug to ANT-147`
+- `remove label bug from ANT-147`
 - `add ANT-147 to project Monitoring`
 - `show linear labels`
 - `show linear projects`
+
+### Members and Groups
+- `/members`
+- `/showmember akshat`
+- `/addmember Harsh harsh@anthias.xyz harsh`
+- `/removemember harsh`
+- `/groups`
+- `/addgroup infra vasu akshat vansh`
+- `/removegroup infra`
 
 ## Setup
 
@@ -89,6 +120,7 @@ Fill in:
 ```env
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_ID=
+TELEGRAM_ALLOWED_USERNAME=OxVoyd
 AI_PROVIDER=openai
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-4.1-mini
@@ -97,7 +129,9 @@ GEMINI_MODEL=gemini-2.5-flash
 LINEAR_API_KEY=
 ```
 
-`TELEGRAM_ALLOWED_CHAT_ID` is optional for open testing. Leave it blank if you want to talk to the bot directly without allowlisting.
+Security notes:
+- `TELEGRAM_ALLOWED_USERNAME` is the primary identity lock. By default Pippo only responds to `@OxVoyd`.
+- `TELEGRAM_ALLOWED_CHAT_ID` is optional extra hardening if you want both username and chat ID enforcement.
 
 AI provider notes:
 - `AI_PROVIDER=openai` uses your OpenAI API key
@@ -158,6 +192,8 @@ Available backend tool powerups include:
 - `create_calendar_event(...)`
 - `authenticate_google_account(...)`
 - `list_connected_google_accounts()`
+- `list_todays_meetings(...)`
+- `find_free_slots(...)`
 - `get_linear_profile()`
 - `list_linear_orgs()`
 - `list_linear_issues(...)`
@@ -165,22 +201,18 @@ Available backend tool powerups include:
 - `create_linear_issue_tool(...)`
 - `update_linear_issue_state_tool(...)`
 - `update_linear_issue_labels_tool(...)`
+- `add_linear_issue_labels_tool(...)`
+- `remove_linear_issue_labels_tool(...)`
 - `update_linear_issue_project_tool(...)`
+- `assign_linear_issue_tool(...)`
 
 ## Tiny But Important Notes
 
 - The `work` Google account needs Google Calendar API enabled in its own Google Cloud project.
 - The bot can remember the last referenced Linear issue in chat for follow-ups like `this issue`.
-- Linear labels currently work as a replace-style update in the backend flow unless you explicitly teach it additive/removal semantics.
+- The bot now supports both label replacement and additive/remove label flows.
+- Risky actions like creating meetings or mutating Linear issues now require a confirmation tap.
 - If you pasted secrets in chat while testing, rotate them later. Future you will be grateful.
-
-## Logo Drop Zone
-
-To make the logo render in this README, save the image in the repo root as:
-
-`pippo-logo.png`
-
-Right now the README is already wired to that path.
 
 ## Vibe Check
 
