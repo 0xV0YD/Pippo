@@ -8,3 +8,4 @@ services:
     restart: unless-stopped
     volumes:
       - ./credentials:/app/credentials
+      - ./data:/app/data

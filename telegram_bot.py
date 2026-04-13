@@ -17,6 +17,16 @@ from telegram.ext import (
 )
 
 from utils.calendar_client import create_google_calendar_event
+from utils.contact_store import (
+    add_contact,
+    add_group,
+    contacts_prompt_block,
+    find_contact,
+    groups_prompt_block,
+    load_contacts,
+    load_groups,
+    remove_contact,
+)
 from utils.linear_client import (
     create_linear_issue,
     filter_linear_issues,
@@ -182,7 +192,7 @@ def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": f"{SYSTEM_PROMPT}\n\nUser message:\n{user_message}"}],
+                "parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contacts_prompt_block()}\n{groups_prompt_block()}\n\nUser message:\n{user_message}"}],
             }
         ],
         "generationConfig": {
@@ -239,7 +249,7 @@ def call_openai_for_action(config: BotConfig, user_message: str) -> dict:
         json={
             "model": config.openai_model,
             "instructions": SYSTEM_PROMPT,
-            "input": f"Return JSON only.\nUser message:\n{user_message}",
+            "input": f"Return JSON only.\n{contacts_prompt_block()}\n{groups_prompt_block()}\n\nUser message:\n{user_message}",
             "text": {
                 "format": {
                     "type": "json_object"
@@ -457,6 +467,101 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Select the calendar account to use for upcoming tasks:",
         reply_markup=get_account_selector_markup(selected_account),
     )
+
+
+async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    contacts = load_contacts()
+    if not contacts:
+        await update.effective_message.reply_text("No members saved yet.")
+        return
+
+    lines = ["Saved members:"]
+    for contact in contacts:
+        aliases = ", ".join(contact.get("aliases", []))
+        lines.append(f"- {contact['name']} <{contact['email']}> aliases: {aliases}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    groups = load_groups()
+    if not groups:
+        await update.effective_message.reply_text("No groups saved yet.")
+        return
+
+    lines = ["Saved groups:"]
+    for group in groups:
+        members = ", ".join(group.get("members", []))
+        lines.append(f"- {group['name']}: {members}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def add_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text("Usage: /addmember Name email@example.com [alias1,alias2]")
+        return
+
+    name = args[0]
+    email = args[1]
+    aliases = args[2].split(",") if len(args) > 2 else [name.lower()]
+    try:
+        contact = add_contact(name=name, email=email, aliases=aliases)
+        await update.effective_message.reply_text(
+            f"Added member {contact['name']} <{contact['email']}> aliases: {', '.join(contact['aliases'])}"
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
+async def remove_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /removemember email_or_alias")
+        return
+
+    try:
+        contact = remove_contact(context.args[0])
+        await update.effective_message.reply_text(f"Removed member {contact['name']} <{contact['email']}>")
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
+async def add_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Usage: /addgroup group_name member1,member2,member3")
+        return
+
+    group_name = context.args[0]
+    members = [member.strip() for member in " ".join(context.args[1:]).split(",") if member.strip()]
+    try:
+        group = add_group(group_name, members)
+        await update.effective_message.reply_text(f"Added group {group['name']}: {', '.join(group['members'])}")
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
 
 
 async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -702,6 +807,11 @@ def main() -> None:
     application.bot_data["last_linear_issue_ids"] = {}
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("members", members_command))
+    application.add_handler(CommandHandler("groups", groups_command))
+    application.add_handler(CommandHandler("addmember", add_member_command))
+    application.add_handler(CommandHandler("removemember", remove_member_command))
+    application.add_handler(CommandHandler("addgroup", add_group_command))
     application.add_handler(CallbackQueryHandler(account_callback, pattern=r"^select_account:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()

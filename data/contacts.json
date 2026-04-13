@@ -1,0 +1,42 @@
+[
+  {
+    "name": "Vasu",
+    "email": "vasu@anthias.xyz",
+    "aliases": ["vasu"]
+  },
+  {
+    "name": "Akshat",
+    "email": "akshat@anthias.xyz",
+    "aliases": ["akshat"]
+  },
+  {
+    "name": "Vansh",
+    "email": "vansh@anthias.xyz",
+    "aliases": ["vansh"]
+  },
+  {
+    "name": "Vaishnavi",
+    "email": "vaishnavi@anthias.xyz",
+    "aliases": ["vaishnavi"]
+  },
+  {
+    "name": "Noah",
+    "email": "noah@anthias.xyz",
+    "aliases": ["noah"]
+  },
+  {
+    "name": "Sy",
+    "email": "sy@anthias.xyz",
+    "aliases": ["sy"]
+  },
+  {
+    "name": "Aaron",
+    "email": "aaron@anthias.xyz",
+    "aliases": ["aaron"]
+  },
+  {
+    "name": "Charlie",
+    "email": "charlie@anthias.xyz",
+    "aliases": ["charlie"]
+  }
+]
