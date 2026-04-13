@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta
 from pathlib import Path
 import re
+from uuid import uuid4
 
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
@@ -107,18 +108,40 @@ def create_google_calendar_event(
         "start": {"dateTime": start_dt.isoformat()},
         "end": {"dateTime": (start_dt + timedelta(hours=1)).isoformat()},
         "attendees": [{"email": attendee} for attendee in cleaned_attendees],
+        "conferenceData": {
+            "createRequest": {
+                "requestId": str(uuid4()),
+                "conferenceSolutionKey": {
+                    "type": "hangoutsMeet",
+                },
+            }
+        },
     }
 
     created_event = (
         service.events()
-        .insert(calendarId="primary", body=event_body, sendUpdates="all")
+        .insert(
+            calendarId="primary",
+            body=event_body,
+            sendUpdates="all",
+            conferenceDataVersion=1,
+        )
         .execute()
     )
+
+    meet_link = created_event.get("hangoutLink", "")
+    if not meet_link:
+        entry_points = ((created_event.get("conferenceData") or {}).get("entryPoints") or [])
+        for entry in entry_points:
+            if entry.get("entryPointType") == "video" and entry.get("uri"):
+                meet_link = entry["uri"]
+                break
 
     return {
         "account": normalized_account,
         "id": created_event.get("id", "unknown"),
         "link": created_event.get("htmlLink", "no link returned"),
+        "meet_link": meet_link or "no Google Meet link returned",
         "title": cleaned_title,
         "start": start_dt.isoformat(),
         "attendee_count": str(len(cleaned_attendees)),

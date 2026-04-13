@@ -17,6 +17,16 @@ from telegram.ext import (
 )
 
 from utils.calendar_client import create_google_calendar_event
+from utils.contact_store import (
+    add_contact,
+    add_group,
+    contacts_prompt_block,
+    find_contact,
+    groups_prompt_block,
+    load_contacts,
+    load_groups,
+    remove_contact,
+)
 from utils.linear_client import (
     create_linear_issue,
     filter_linear_issues,
@@ -83,8 +93,11 @@ Rules:
 class BotConfig:
     telegram_bot_token: str
     telegram_allowed_chat_id: int | None
+    ai_provider: str
     gemini_api_key: str
     gemini_model: str
+    openai_api_key: str
+    openai_model: str
 
 
 LINEAR_STATE_ALIASES = {
@@ -139,25 +152,34 @@ def load_config() -> BotConfig:
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+    ai_provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+    openai_api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    openai_model = os.getenv("OPENAI_MODEL", "gpt-4.1-mini").strip()
 
     missing = [
         name
         for name, value in [
             ("TELEGRAM_BOT_TOKEN", token),
-            ("GEMINI_API_KEY", gemini_api_key),
         ]
         if not value
     ]
+    if ai_provider == "gemini" and not gemini_api_key:
+        missing.append("GEMINI_API_KEY")
+    if ai_provider == "openai" and not openai_api_key:
+        missing.append("OPENAI_API_KEY")
     if missing:
         raise ValueError(f"Missing required environment variables: {', '.join(missing)}")
 
     return BotConfig(
         telegram_bot_token=token,
         telegram_allowed_chat_id=int(chat_id) if chat_id else None,
+        ai_provider=ai_provider,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
+        openai_api_key=openai_api_key,
+        openai_model=openai_model,
     )
 
 
@@ -170,7 +192,7 @@ def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
         "contents": [
             {
                 "role": "user",
-                "parts": [{"text": f"{SYSTEM_PROMPT}\n\nUser message:\n{user_message}"}],
+                "parts": [{"text": f"{SYSTEM_PROMPT}\n\n{contacts_prompt_block()}\n{groups_prompt_block()}\n\nUser message:\n{user_message}"}],
             }
         ],
         "generationConfig": {
@@ -192,6 +214,73 @@ def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
         raise ValueError("Gemini returned an empty response")
 
     return json.loads(text)
+
+
+def raise_for_status_with_body(response: requests.Response, provider_name: str) -> None:
+    if response.ok:
+        return
+    try:
+        payload = response.json()
+    except Exception:
+        payload = response.text
+    raise ValueError(f"{provider_name} API error ({response.status_code}): {payload}")
+
+
+def extract_openai_text(payload: dict) -> str:
+    if payload.get("output_text"):
+        return payload["output_text"]
+
+    parts = []
+    for item in payload.get("output", []):
+        for content in item.get("content", []):
+            text = content.get("text")
+            if text:
+                parts.append(text)
+    return "".join(parts).strip()
+
+
+def call_openai_for_action(config: BotConfig, user_message: str) -> dict:
+    response = requests.post(
+        "https://api.openai.com/v1/responses",
+        headers={
+            "Authorization": f"Bearer {config.openai_api_key}",
+            "Content-Type": "application/json",
+        },
+        json={
+            "model": config.openai_model,
+            "instructions": SYSTEM_PROMPT,
+            "input": f"Return JSON only.\n{contacts_prompt_block()}\n{groups_prompt_block()}\n\nUser message:\n{user_message}",
+            "text": {
+                "format": {
+                    "type": "json_object"
+                }
+            },
+        },
+        timeout=60,
+    )
+    raise_for_status_with_body(response, "OpenAI")
+    payload = response.json()
+    text = extract_openai_text(payload)
+    if not text:
+        raise ValueError("OpenAI returned an empty response")
+    return json.loads(text)
+
+
+def call_ai_for_action(config: BotConfig, user_message: str) -> dict:
+    if config.ai_provider == "openai":
+        try:
+            return call_openai_for_action(config, user_message)
+        except Exception as exc:
+            if config.gemini_api_key and any(
+                marker in str(exc).lower()
+                for marker in ["429", "insufficient_quota", "rate limit", "quota"]
+            ):
+                logger.warning("OpenAI failed, falling back to Gemini: %s", exc)
+                return call_gemini_for_action(config, user_message)
+            raise
+    if config.ai_provider == "gemini":
+        return call_gemini_for_action(config, user_message)
+    raise ValueError(f"Unsupported AI_PROVIDER: {config.ai_provider}")
 
 
 def parse_linear_filters(user_message: str, last_issue_id: str | None = None) -> dict | None:
@@ -380,6 +469,101 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    contacts = load_contacts()
+    if not contacts:
+        await update.effective_message.reply_text("No members saved yet.")
+        return
+
+    lines = ["Saved members:"]
+    for contact in contacts:
+        aliases = ", ".join(contact.get("aliases", []))
+        lines.append(f"- {contact['name']} <{contact['email']}> aliases: {aliases}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    groups = load_groups()
+    if not groups:
+        await update.effective_message.reply_text("No groups saved yet.")
+        return
+
+    lines = ["Saved groups:"]
+    for group in groups:
+        members = ", ".join(group.get("members", []))
+        lines.append(f"- {group['name']}: {members}")
+    await update.effective_message.reply_text("\n".join(lines))
+
+
+async def add_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    args = context.args
+    if len(args) < 2:
+        await update.effective_message.reply_text("Usage: /addmember Name email@example.com [alias1,alias2]")
+        return
+
+    name = args[0]
+    email = args[1]
+    aliases = args[2].split(",") if len(args) > 2 else [name.lower()]
+    try:
+        contact = add_contact(name=name, email=email, aliases=aliases)
+        await update.effective_message.reply_text(
+            f"Added member {contact['name']} <{contact['email']}> aliases: {', '.join(contact['aliases'])}"
+        )
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
+async def remove_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /removemember email_or_alias")
+        return
+
+    try:
+        contact = remove_contact(context.args[0])
+        await update.effective_message.reply_text(f"Removed member {contact['name']} <{contact['email']}>")
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
+async def add_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if len(context.args) < 2:
+        await update.effective_message.reply_text("Usage: /addgroup group_name member1,member2,member3")
+        return
+
+    group_name = context.args[0]
+    members = [member.strip() for member in " ".join(context.args[1:]).split(",") if member.strip()]
+    try:
+        group = add_group(group_name, members)
+        await update.effective_message.reply_text(f"Added group {group['name']}: {', '.join(group['members'])}")
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
 async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if query is None:
@@ -434,7 +618,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 context,
                 update.effective_chat.id if update.effective_chat else None,
             ),
-        ) or call_gemini_for_action(config, message.text)
+        ) or call_ai_for_action(config, message.text)
         action = parsed.get("action")
 
         if action == "needs_clarification":
@@ -455,7 +639,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Title: {event['title']}\n"
                 f"Start: {event['start']}\n"
                 f"Attendees: {event['attendee_count']}\n"
-                f"Link: {event['link']}"
+                f"Calendar Link: {event['link']}\n"
+                f"Meet Link: {event['meet_link']}"
             )
             return
 
@@ -622,6 +807,11 @@ def main() -> None:
     application.bot_data["last_linear_issue_ids"] = {}
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("members", members_command))
+    application.add_handler(CommandHandler("groups", groups_command))
+    application.add_handler(CommandHandler("addmember", add_member_command))
+    application.add_handler(CommandHandler("removemember", remove_member_command))
+    application.add_handler(CommandHandler("addgroup", add_group_command))
     application.add_handler(CallbackQueryHandler(account_callback, pattern=r"^select_account:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()

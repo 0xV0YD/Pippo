@@ -89,12 +89,20 @@ Fill in:
 ```env
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_ALLOWED_CHAT_ID=
+AI_PROVIDER=openai
+OPENAI_API_KEY=
+OPENAI_MODEL=gpt-4.1-mini
 GEMINI_API_KEY=
 GEMINI_MODEL=gemini-2.5-flash
 LINEAR_API_KEY=
 ```
 
 `TELEGRAM_ALLOWED_CHAT_ID` is optional for open testing. Leave it blank if you want to talk to the bot directly without allowlisting.
+
+AI provider notes:
+- `AI_PROVIDER=openai` uses your OpenAI API key
+- `AI_PROVIDER=gemini` uses your Gemini API key
+- OpenAI is the default path now
 
 ### 2. Google Calendar creds
 

@@ -59,5 +59,6 @@ def create_calendar_event(
         f"Created Google Calendar event '{created_event['title']}' for {created_event['start']} "
         f"using account '{created_event['account']}' with {created_event['attendee_count']} attendee(s). "
         f"Event ID: {created_event['id']}. "
-        f"Link: {created_event['link']}"
+        f"Calendar Link: {created_event['link']} "
+        f"Meet Link: {created_event['meet_link']}"
     )
