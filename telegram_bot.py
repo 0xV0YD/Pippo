@@ -5,8 +5,15 @@ from dataclasses import dataclass
 
 import requests
 from dotenv import load_dotenv
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from utils.calendar_client import create_google_calendar_event
 
@@ -16,6 +23,11 @@ logging.basicConfig(
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
+
+ACCOUNT_LABELS = {
+    "default": "Personal Yash",
+    "work": "Pro Yash",
+}
 
 
 SYSTEM_PROMPT = """You are a scheduling assistant for a Telegram bot.
@@ -37,6 +49,26 @@ class BotConfig:
     telegram_allowed_chat_id: int | None
     gemini_api_key: str
     gemini_model: str
+
+
+def get_account_selector_markup(selected_account: str | None = None) -> InlineKeyboardMarkup:
+    keyboard = []
+    for alias, label in ACCOUNT_LABELS.items():
+        prefix = "Active: " if alias == selected_account else ""
+        keyboard.append([InlineKeyboardButton(f"{prefix}{label}", callback_data=f"select_account:{alias}")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+def get_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None) -> str:
+    if chat_id is None:
+        return "default"
+    selected_accounts = context.application.bot_data.setdefault("selected_accounts", {})
+    return selected_accounts.get(chat_id, "default")
+
+
+def set_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int, account: str) -> None:
+    selected_accounts = context.application.bot_data.setdefault("selected_accounts", {})
+    selected_accounts[chat_id] = account
 
 
 def load_config() -> BotConfig:
@@ -114,8 +146,58 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.effective_message.reply_text("This bot is not authorized for this chat.")
         return
 
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    selected_account = get_selected_account(context, chat_id)
     await update.effective_message.reply_text(
-        "Send me a scheduling message like: schedule Codex Sync at 3pm IST on 2026-04-13 with yash@anthias.xyz"
+        "Choose which calendar account should be active for upcoming tasks, then send a scheduling message.",
+        reply_markup=get_account_selector_markup(selected_account),
+    )
+    await update.effective_message.reply_text(
+        f"Current account: {ACCOUNT_LABELS[selected_account]}\n"
+        "Example: schedule Codex Sync at 3pm IST on 2026-04-13 with yash@anthias.xyz"
+    )
+
+
+async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    chat_id = update.effective_chat.id if update.effective_chat else None
+    selected_account = get_selected_account(context, chat_id)
+    await update.effective_message.reply_text(
+        "Select the calendar account to use for upcoming tasks:",
+        reply_markup=get_account_selector_markup(selected_account),
+    )
+
+
+async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await query.answer("This bot is not authorized for this chat.", show_alert=True)
+        return
+
+    data = query.data or ""
+    if not data.startswith("select_account:"):
+        await query.answer()
+        return
+
+    selected_account = data.split(":", 1)[1]
+    chat_id = query.message.chat_id if query.message else None
+    if chat_id is None or selected_account not in ACCOUNT_LABELS:
+        await query.answer("Unknown account.", show_alert=True)
+        return
+
+    set_selected_account(context, chat_id, selected_account)
+    await query.answer(f"Using {ACCOUNT_LABELS[selected_account]}")
+    await query.edit_message_text(
+        f"Selected account: {ACCOUNT_LABELS[selected_account]}",
+        reply_markup=get_account_selector_markup(selected_account),
     )
 
 
@@ -140,13 +222,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if action != "create_calendar_event":
             raise ValueError(f"Unexpected Gemini action: {action}")
 
+        selected_account = get_selected_account(context, update.effective_chat.id if update.effective_chat else None)
         event = create_google_calendar_event(
             title=parsed["title"],
             start=parsed["start"],
             attendees=parsed["attendees"],
+            account=selected_account,
         )
         await message.reply_text(
             "Scheduled it.\n"
+            f"Account: {ACCOUNT_LABELS.get(event['account'], event['account'])}\n"
             f"Title: {event['title']}\n"
             f"Start: {event['start']}\n"
             f"Attendees: {event['attendee_count']}\n"
@@ -161,7 +246,10 @@ def main() -> None:
     config = load_config()
     application = Application.builder().token(config.telegram_bot_token).build()
     application.bot_data["config"] = config
+    application.bot_data["selected_accounts"] = {}
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CallbackQueryHandler(account_callback, pattern=r"^select_account:"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()
 
