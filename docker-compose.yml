@@ -1,0 +1,10 @@
+services:
+  telegram-bot:
+    build:
+      context: .
+    container_name: proj3-telegram-bot
+    env_file:
+      - .env
+    restart: unless-stopped
+    volumes:
+      - ./credentials:/app/credentials

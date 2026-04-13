@@ -1,0 +1,11 @@
+[
+  {
+    "id": "3c2941a8-768a-42b0-bc3a-c871158b4a8e",
+    "title": "Test Meeting",
+    "start": "2026-04-14T10:00:00",
+    "attendees": [
+      "alice@example.com",
+      "bob@example.com"
+    ]
+  }
+]

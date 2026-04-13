@@ -1,0 +1,11 @@
+.git
+.venv
+__pycache__
+*.pyc
+.env
+credentials/google_token.json
+data/calendar_events.json
+build
+dist
+wheels
+*.egg-info
