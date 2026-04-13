@@ -223,4 +223,4 @@ This project is:
 
 Which is exactly where a good personal automation bot should be.
 
-Made with love by me
+Made with ❤️ by me
