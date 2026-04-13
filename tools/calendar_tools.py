@@ -2,6 +2,8 @@ from server import mcp
 from utils.calendar_client import (
     authenticate_google_account as authenticate_google_account_impl,
     create_google_calendar_event,
+    find_google_calendar_free_slots,
+    list_google_calendar_events_for_day,
     list_google_accounts,
 )
 
@@ -62,3 +64,34 @@ def create_calendar_event(
         f"Calendar Link: {created_event['link']} "
         f"Meet Link: {created_event['meet_link']}"
     )
+
+
+@mcp.tool()
+def list_todays_meetings(account: str = "default") -> str:
+    """
+    List today's meetings for a connected Google account alias.
+    """
+    events = list_google_calendar_events_for_day(account=account)
+    if not events:
+        return f"No meetings found today on account '{account}'."
+    lines = [f"Today's meetings for '{account}':"]
+    for event in events:
+        lines.append(f"- {event['title']}")
+        lines.append(f"  {event['start']} -> {event['end']}")
+        if event["meet_link"]:
+            lines.append(f"  Meet: {event['meet_link']}")
+    return "\n".join(lines)
+
+
+@mcp.tool()
+def find_free_slots(day: str = "", duration_minutes: int = 60, account: str = "default") -> str:
+    """
+    Find open free slots on a given day.
+    """
+    slots = find_google_calendar_free_slots(day=day or None, duration_minutes=duration_minutes, account=account)
+    if not slots:
+        return f"No free slots found for {day or 'today'} on account '{account}'."
+    lines = [f"Free slots for {day or 'today'} on '{account}':"]
+    for slot in slots:
+        lines.append(f"- {slot['start']} -> {slot['end']}")
+    return "\n".join(lines)

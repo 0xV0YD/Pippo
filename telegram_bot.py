@@ -3,6 +3,7 @@ import logging
 import os
 import re
 from dataclasses import dataclass
+from datetime import datetime
 
 import requests
 from dotenv import load_dotenv
@@ -16,18 +17,26 @@ from telegram.ext import (
     filters,
 )
 
-from utils.calendar_client import create_google_calendar_event
+from utils.calendar_client import (
+    create_google_calendar_event,
+    find_google_calendar_free_slots,
+    list_google_calendar_events_for_day,
+)
 from utils.contact_store import (
     add_contact,
     add_group,
     contacts_prompt_block,
+    find_group,
     find_contact,
     groups_prompt_block,
     load_contacts,
     load_groups,
     remove_contact,
+    remove_group,
 )
 from utils.linear_client import (
+    add_linear_issue_labels,
+    assign_linear_issue,
     create_linear_issue,
     filter_linear_issues,
     format_linear_issues_readable,
@@ -39,6 +48,7 @@ from utils.linear_client import (
     list_linear_team_issues,
     list_linear_teams,
     list_my_linear_issues,
+    remove_linear_issue_labels,
     update_linear_issue_labels,
     update_linear_issue_project,
     update_linear_issue_state,
@@ -57,6 +67,43 @@ ACCOUNT_LABELS = {
 }
 
 
+HELP_TEXT = """Pippo quick guide
+
+Calendar
+- /start
+- /accounts
+- list today's meetings
+- find free slots today
+- find free slots on 2026-04-14 for 30 minutes
+- schedule a sync with infra tomorrow at 4pm IST named Infra Sync
+
+Members and groups
+- /members
+- /showmember akshat
+- /addmember Harsh harsh@anthias.xyz harsh
+- /removemember harsh
+- /groups
+- /addgroup infra vasu akshat vansh
+- /removegroup infra
+
+Linear
+- show my linear orgs
+- show my linear issues
+- my in progress issues in ANT
+- create a linear issue in ANT titled Fix dashboard issue
+- assign ANT-147 to akshat
+- move ANT-147 to in progress
+- add label bug to ANT-147
+- remove label bug from ANT-147
+- add ANT-147 to project Monitoring
+
+Safety
+- risky actions ask for Confirm / Cancel buttons before they run
+
+Tip
+- you can use saved member names and group names instead of typing emails every time"""
+
+
 SYSTEM_PROMPT = """You are an assistant for a Telegram bot that can help with Google Calendar and Linear.
 Return only valid JSON.
 Supported JSON shapes:
@@ -70,6 +117,11 @@ Supported JSON shapes:
 {"action":"list_linear_labels"}
 {"action":"update_linear_issue_labels","issue_id":"ANT-147","label_names":["Bug","Urgent"]}
 {"action":"update_linear_issue_project","issue_id":"ANT-147","project_name":"Monitoring"}
+{"action":"add_linear_issue_labels","issue_id":"ANT-147","label_names":["Bug"]}
+{"action":"remove_linear_issue_labels","issue_id":"ANT-147","label_names":["Bug"]}
+{"action":"assign_linear_issue","issue_id":"ANT-147","assignee":"akshat@anthias.xyz"}
+{"action":"list_todays_meetings"}
+{"action":"find_free_slots","day":"2026-04-13","duration_minutes":60}
 Rules:
 - Only return JSON.
 - The start value must always include a timezone offset.
@@ -82,7 +134,11 @@ Rules:
 - For "show linear projects" use action "list_linear_projects".
 - For "show linear labels" use action "list_linear_labels".
 - For "add label Bug to ANT-147" use action "update_linear_issue_labels".
+- For "remove label Bug from ANT-147" use action "remove_linear_issue_labels".
 - For "add ANT-147 to project Monitoring" use action "update_linear_issue_project".
+- For "assign ANT-147 to Akshat" use action "assign_linear_issue".
+- For "list today's meetings" use action "list_todays_meetings".
+- For "find free slots today" use action "find_free_slots".
 - If limit is not specified for Linear list actions, use 20.
 - If any required field is missing or ambiguous, return:
 {"action":"needs_clarification","question":"..."}
@@ -93,6 +149,7 @@ Rules:
 class BotConfig:
     telegram_bot_token: str
     telegram_allowed_chat_id: int | None
+    telegram_allowed_username: str
     ai_provider: str
     gemini_api_key: str
     gemini_model: str
@@ -121,6 +178,17 @@ def get_account_selector_markup(selected_account: str | None = None) -> InlineKe
     return InlineKeyboardMarkup(keyboard)
 
 
+def get_confirmation_markup(action_id: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("Confirm", callback_data=f"confirm_action:{action_id}"),
+                InlineKeyboardButton("Cancel", callback_data=f"cancel_action:{action_id}"),
+            ]
+        ]
+    )
+
+
 def get_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None) -> str:
     if chat_id is None:
         return "default"
@@ -147,11 +215,16 @@ def set_last_linear_issue_id(context: ContextTypes.DEFAULT_TYPE, chat_id: int | 
     last_issue_ids[chat_id] = issue_id
 
 
+def get_pending_actions(context: ContextTypes.DEFAULT_TYPE) -> dict:
+    return context.application.bot_data.setdefault("pending_actions", {})
+
+
 def load_config() -> BotConfig:
     load_dotenv()
 
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_ALLOWED_CHAT_ID", "").strip()
+    allowed_username = os.getenv("TELEGRAM_ALLOWED_USERNAME", "OxVoyd").strip().lstrip("@")
     ai_provider = os.getenv("AI_PROVIDER", "openai").strip().lower()
     gemini_api_key = os.getenv("GEMINI_API_KEY", "").strip()
     gemini_model = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
@@ -175,6 +248,7 @@ def load_config() -> BotConfig:
     return BotConfig(
         telegram_bot_token=token,
         telegram_allowed_chat_id=int(chat_id) if chat_id else None,
+        telegram_allowed_username=allowed_username,
         ai_provider=ai_provider,
         gemini_api_key=gemini_api_key,
         gemini_model=gemini_model,
@@ -286,6 +360,24 @@ def call_ai_for_action(config: BotConfig, user_message: str) -> dict:
 def parse_linear_filters(user_message: str, last_issue_id: str | None = None) -> dict | None:
     text = user_message.strip()
     lowered = text.lower()
+
+    if any(phrase in lowered for phrase in ["today's meetings", "todays meetings", "list today's meetings", "list todays meetings"]):
+        return {"action": "list_todays_meetings"}
+
+    if "free slot" in lowered or "free time" in lowered:
+        day_match = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", text)
+        duration_match = re.search(r"\b(\d+)\s*(minute|min|minutes|mins|hour|hours)\b", lowered)
+        duration_minutes = 60
+        if duration_match:
+            quantity = int(duration_match.group(1))
+            unit = duration_match.group(2)
+            duration_minutes = quantity * 60 if "hour" in unit else quantity
+        return {
+            "action": "find_free_slots",
+            "day": day_match.group(1) if day_match else "",
+            "duration_minutes": duration_minutes,
+        }
+
     if re.search(r"\b[A-Z]{2,10}-\d+\b", text):
         has_linear_signal = True
     else:
@@ -358,11 +450,25 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
             raw_labels = label_match.group(1)
             label_names = [part.strip().strip('"').strip("'") for part in re.split(r",| and ", raw_labels) if part.strip()]
             if label_names:
+                action_name = "update_linear_issue_labels"
+                if "remove label" in lowered or "remove labels" in lowered:
+                    action_name = "remove_linear_issue_labels"
+                elif "add label" in lowered or "add labels" in lowered:
+                    action_name = "add_linear_issue_labels"
                 return {
-                    "action": "update_linear_issue_labels",
+                    "action": action_name,
                     "issue_id": issue_id,
                     "label_names": label_names,
                 }
+
+    if issue_id and any(word in lowered for word in ["assign", "assignee"]):
+        assignee_match = re.search(r"\bassign(?:\s+(?:it|issue))?\s+(?:to\s+)?(.+)$", text, re.IGNORECASE)
+        if assignee_match:
+            return {
+                "action": "assign_linear_issue",
+                "issue_id": issue_id,
+                "assignee": assignee_match.group(1).strip().strip('"').strip("'"),
+            }
 
     if issue_id and "project" in lowered:
         project_match = re.search(r"\bproject\s+(.+)$", text, re.IGNORECASE)
@@ -430,11 +536,21 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
 
 def ensure_authorized(update: Update, config: BotConfig) -> bool:
     chat = update.effective_chat
+    user = update.effective_user
     if chat is None:
         return False
-    if config.telegram_allowed_chat_id is None:
-        return True
-    return chat.id == config.telegram_allowed_chat_id
+    if user is None:
+        return False
+
+    username = (user.username or "").strip().lstrip("@").lower()
+    allowed_username = config.telegram_allowed_username.strip().lstrip("@").lower()
+    if allowed_username and username != allowed_username:
+        return False
+
+    if config.telegram_allowed_chat_id is not None and chat.id != config.telegram_allowed_chat_id:
+        return False
+
+    return True
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -467,6 +583,14 @@ async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "Select the calendar account to use for upcoming tasks:",
         reply_markup=get_account_selector_markup(selected_account),
     )
+
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+    await update.effective_message.reply_text(HELP_TEXT)
 
 
 async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -503,6 +627,27 @@ async def groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         members = ", ".join(group.get("members", []))
         lines.append(f"- {group['name']}: {members}")
     await update.effective_message.reply_text("\n".join(lines))
+
+
+async def show_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /showmember alias_or_email")
+        return
+
+    contact = find_contact(context.args[0])
+    if not contact:
+        await update.effective_message.reply_text(f"Member '{context.args[0]}' not found.")
+        return
+
+    aliases = ", ".join(contact.get("aliases", [])) or "none"
+    await update.effective_message.reply_text(
+        f"Member: {contact['name']}\nEmail: {contact['email']}\nAliases: {aliases}"
+    )
 
 
 async def add_member_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -552,14 +697,31 @@ async def add_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     if len(context.args) < 2:
-        await update.effective_message.reply_text("Usage: /addgroup group_name member1,member2,member3")
+        await update.effective_message.reply_text("Usage: /addgroup group_name member1 member2 member3")
         return
 
     group_name = context.args[0]
-    members = [member.strip() for member in " ".join(context.args[1:]).split(",") if member.strip()]
+    members = [member.strip() for member in re.split(r"[,\s]+", " ".join(context.args[1:])) if member.strip()]
     try:
         group = add_group(group_name, members)
         await update.effective_message.reply_text(f"Added group {group['name']}: {', '.join(group['members'])}")
+    except Exception as exc:
+        await update.effective_message.reply_text(str(exc))
+
+
+async def remove_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    if not context.args:
+        await update.effective_message.reply_text("Usage: /removegroup group_name")
+        return
+
+    try:
+        group = remove_group(context.args[0])
+        await update.effective_message.reply_text(f"Removed group {group['name']}")
     except Exception as exc:
         await update.effective_message.reply_text(str(exc))
 
@@ -593,12 +755,185 @@ async def account_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     )
 
 
+async def action_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if query is None:
+        return
+
+    data = query.data or ""
+    if not (data.startswith("confirm_action:") or data.startswith("cancel_action:")):
+        await query.answer()
+        return
+
+    action_id = data.split(":", 1)[1]
+    pending_actions = get_pending_actions(context)
+    spec = pending_actions.get(action_id)
+    if not spec:
+        await query.answer("This action expired.", show_alert=True)
+        return
+
+    if data.startswith("cancel_action:"):
+        pending_actions.pop(action_id, None)
+        await query.answer("Cancelled")
+        await query.edit_message_text("Cancelled.")
+        return
+
+    try:
+        chat_id = query.message.chat_id if query.message else None
+        if chat_id is None:
+            raise ValueError("Missing chat for confirmation")
+        result_text = await execute_pending_action(context, chat_id, spec)
+        pending_actions.pop(action_id, None)
+        await query.answer("Done")
+        await query.edit_message_text(f"{query.message.text}\n\nConfirmed.")
+        await context.bot.send_message(chat_id=chat_id, text=result_text)
+    except Exception as exc:
+        pending_actions.pop(action_id, None)
+        await query.answer("Failed", show_alert=True)
+        if query.message:
+            await context.bot.send_message(chat_id=query.message.chat_id, text=f"Action failed: {exc}")
+
+
 def format_linear_teams(teams: list[dict]) -> str:
     if not teams:
         return "No Linear teams found."
     return "Linear teams:\n" + "\n".join(
         f"- {team['key']}: {team['name']} (id: {team['id']})" for team in teams
     )
+
+
+def format_calendar_events_readable(events: list[dict], heading: str) -> str:
+    if not events:
+        return f"{heading}\nNo meetings found."
+    lines = [heading]
+    for event in events:
+        lines.append(f"- {event['title']}")
+        lines.append(f"  {event['start']} -> {event['end']}")
+        if event.get("attendees"):
+            lines.append(f"  Attendees: {', '.join(event['attendees'])}")
+        if event.get("meet_link"):
+            lines.append(f"  Meet: {event['meet_link']}")
+    return "\n".join(lines)
+
+
+def resolve_attendee_tokens(attendees: list[str]) -> list[str]:
+    resolved = []
+    seen = set()
+    for attendee in attendees:
+        token = attendee.strip()
+        if not token:
+            continue
+        group = find_group(token)
+        if group:
+            for email in group["members"]:
+                if email not in seen:
+                    seen.add(email)
+                    resolved.append(email)
+            continue
+        contact = find_contact(token)
+        if contact:
+            if contact["email"] not in seen:
+                seen.add(contact["email"])
+                resolved.append(contact["email"])
+            continue
+        if "@" in token and token not in seen:
+            seen.add(token)
+            resolved.append(token)
+    return resolved
+
+
+def create_pending_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, spec: dict) -> str:
+    if chat_id is None:
+        raise ValueError("Chat is required for pending actions")
+    action_id = f"{chat_id}:{len(get_pending_actions(context)) + 1}:{int(datetime.now().timestamp())}"
+    get_pending_actions(context)[action_id] = spec
+    return action_id
+
+
+def build_confirmation_text(spec: dict) -> str:
+    action = spec["action"]
+    payload = spec["payload"]
+    if action == "create_calendar_event":
+        return (
+            "Confirm meeting creation?\n"
+            f"Account: {ACCOUNT_LABELS.get(payload['account'], payload['account'])}\n"
+            f"Title: {payload['title']}\n"
+            f"Start: {payload['start']}\n"
+            f"Attendees: {', '.join(payload['attendees'])}"
+        )
+    if action == "create_linear_issue":
+        return f"Confirm Linear issue creation?\nTeam: {payload['team_key']}\nTitle: {payload['title']}"
+    if action == "update_linear_issue_state":
+        return f"Confirm moving {payload['issue_id']} to {payload['state_name']}?"
+    if action in {"update_linear_issue_labels", "add_linear_issue_labels", "remove_linear_issue_labels"}:
+        verb = {
+            "update_linear_issue_labels": "replace labels on",
+            "add_linear_issue_labels": "add labels to",
+            "remove_linear_issue_labels": "remove labels from",
+        }[action]
+        return f"Confirm {verb} {payload['issue_id']}?\nLabels: {', '.join(payload['label_names'])}"
+    if action == "update_linear_issue_project":
+        return f"Confirm adding {payload['issue_id']} to project {payload['project_name']}?"
+    if action == "assign_linear_issue":
+        return f"Confirm assigning {payload['issue_id']} to {payload['assignee']}?"
+    return "Confirm this action?"
+
+
+async def execute_pending_action(context: ContextTypes.DEFAULT_TYPE, chat_id: int, spec: dict) -> str:
+    action = spec["action"]
+    payload = spec["payload"]
+    if action == "create_calendar_event":
+        event = create_google_calendar_event(
+            title=payload["title"],
+            start=payload["start"],
+            attendees=payload["attendees"],
+            account=payload["account"],
+        )
+        return (
+            "Scheduled it.\n"
+            f"Account: {ACCOUNT_LABELS.get(event['account'], event['account'])}\n"
+            f"Title: {event['title']}\n"
+            f"Start: {event['start']}\n"
+            f"Attendees: {event['attendee_count']}\n"
+            f"Calendar Link: {event['link']}\n"
+            f"Meet Link: {event['meet_link']}"
+        )
+    if action == "create_linear_issue":
+        team = get_linear_team_by_key(payload["team_key"])
+        viewer = get_linear_viewer()
+        issue = create_linear_issue(
+            team_id=team["id"],
+            title=payload["title"],
+            description=payload.get("description", ""),
+            assignee_id=viewer["id"] if payload.get("assign_to_me") else None,
+        )
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Created Linear issue {issue['identifier']} in {team['key']}.\nTitle: {issue['title']}\nLink: {issue['url']}"
+    if action == "update_linear_issue_state":
+        issue = update_linear_issue_state(issue_id=payload["issue_id"], state_name=payload["state_name"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Updated {issue['identifier']} to {issue['state']['name']}.\nTitle: {issue['title']}\nLink: {issue['url']}"
+    if action == "update_linear_issue_labels":
+        issue = update_linear_issue_labels(issue_id=payload["issue_id"], label_names=payload["label_names"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Updated labels for {issue['identifier']}.\nLabels: {', '.join(label['name'] for label in issue['labels']['nodes']) or 'no labels'}\nLink: {issue['url']}"
+    if action == "add_linear_issue_labels":
+        issue = add_linear_issue_labels(issue_id=payload["issue_id"], label_names=payload["label_names"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Added labels for {issue['identifier']}.\nLabels: {', '.join(label['name'] for label in issue['labels']['nodes']) or 'no labels'}\nLink: {issue['url']}"
+    if action == "remove_linear_issue_labels":
+        issue = remove_linear_issue_labels(issue_id=payload["issue_id"], label_names=payload["label_names"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Removed labels for {issue['identifier']}.\nLabels: {', '.join(label['name'] for label in issue['labels']['nodes']) or 'no labels'}\nLink: {issue['url']}"
+    if action == "update_linear_issue_project":
+        issue = update_linear_issue_project(issue_id=payload["issue_id"], project_name=payload["project_name"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Updated project for {issue['identifier']}.\nProject: {(issue.get('project') or {}).get('name', 'No project')}\nLink: {issue['url']}"
+    if action == "assign_linear_issue":
+        issue = assign_linear_issue(issue_id=payload["issue_id"], assignee_token=payload["assignee"])
+        set_last_linear_issue_id(context, chat_id, issue["identifier"])
+        return f"Assigned {issue['identifier']} to {(issue.get('assignee') or {}).get('name', 'Unknown')}.\nLink: {issue['url']}"
+    raise ValueError(f"Unknown pending action: {action}")
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -627,21 +962,53 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         if action == "create_calendar_event":
             selected_account = get_selected_account(context, update.effective_chat.id if update.effective_chat else None)
-            event = create_google_calendar_event(
-                title=parsed["title"],
-                start=parsed["start"],
-                attendees=parsed["attendees"],
-                account=selected_account,
+            attendees = resolve_attendee_tokens(parsed["attendees"])
+            if not attendees:
+                raise ValueError("I could not resolve any attendees from that request.")
+            action_id = create_pending_action(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                {
+                    "action": "create_calendar_event",
+                    "payload": {
+                        "title": parsed["title"],
+                        "start": parsed["start"],
+                        "attendees": attendees,
+                        "account": selected_account,
+                    },
+                },
             )
             await message.reply_text(
-                "Scheduled it.\n"
-                f"Account: {ACCOUNT_LABELS.get(event['account'], event['account'])}\n"
-                f"Title: {event['title']}\n"
-                f"Start: {event['start']}\n"
-                f"Attendees: {event['attendee_count']}\n"
-                f"Calendar Link: {event['link']}\n"
-                f"Meet Link: {event['meet_link']}"
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
             )
+            return
+
+        if action == "list_todays_meetings":
+            selected_account = get_selected_account(context, update.effective_chat.id if update.effective_chat else None)
+            events = list_google_calendar_events_for_day(account=selected_account)
+            await message.reply_text(
+                format_calendar_events_readable(
+                    events,
+                    heading=f"Today's meetings on {ACCOUNT_LABELS.get(selected_account, selected_account)}:",
+                )
+            )
+            return
+
+        if action == "find_free_slots":
+            selected_account = get_selected_account(context, update.effective_chat.id if update.effective_chat else None)
+            slots = find_google_calendar_free_slots(
+                day=parsed.get("day") or None,
+                duration_minutes=int(parsed.get("duration_minutes", 60)),
+                account=selected_account,
+            )
+            if not slots:
+                await message.reply_text("No free slots found.")
+            else:
+                lines = [f"Free slots on {ACCOUNT_LABELS.get(selected_account, selected_account)}:"]
+                for slot in slots:
+                    lines.append(f"- {slot['start']} -> {slot['end']}")
+                await message.reply_text("\n".join(lines))
             return
 
         if action == "list_linear_orgs":
@@ -720,76 +1087,90 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             return
 
         if action == "create_linear_issue":
-            team = get_linear_team_by_key(parsed["team_key"])
-            viewer = get_linear_viewer()
-            issue = create_linear_issue(
-                team_id=team["id"],
-                title=parsed["title"],
-                description=parsed.get("description", ""),
-                assignee_id=viewer["id"] if parsed.get("assign_to_me") else None,
-            )
-            await message.reply_text(
-                f"Created Linear issue {issue['identifier']} in {team['key']}.\n"
-                f"Title: {issue['title']}\n"
-                f"Link: {issue['url']}"
-            )
-            set_last_linear_issue_id(
+            action_id = create_pending_action(
                 context,
                 update.effective_chat.id if update.effective_chat else None,
-                issue["identifier"],
+                {"action": "create_linear_issue", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
             )
             return
 
         if action == "update_linear_issue_state":
-            issue = update_linear_issue_state(
-                issue_id=parsed["issue_id"],
-                state_name=parsed["state_name"],
-            )
-            await message.reply_text(
-                f"Updated {issue['identifier']} to {issue['state']['name']}.\n"
-                f"Title: {issue['title']}\n"
-                f"Link: {issue['url']}"
-            )
-            set_last_linear_issue_id(
+            action_id = create_pending_action(
                 context,
                 update.effective_chat.id if update.effective_chat else None,
-                issue["identifier"],
+                {"action": "update_linear_issue_state", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
             )
             return
 
         if action == "update_linear_issue_labels":
-            issue = update_linear_issue_labels(
-                issue_id=parsed["issue_id"],
-                label_names=parsed["label_names"],
-            )
-            label_text = ", ".join(label["name"] for label in issue["labels"]["nodes"]) or "no labels"
-            await message.reply_text(
-                f"Updated labels for {issue['identifier']}.\n"
-                f"Labels: {label_text}\n"
-                f"Link: {issue['url']}"
-            )
-            set_last_linear_issue_id(
+            action_id = create_pending_action(
                 context,
                 update.effective_chat.id if update.effective_chat else None,
-                issue["identifier"],
+                {"action": "update_linear_issue_labels", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
+            )
+            return
+
+        if action == "add_linear_issue_labels":
+            action_id = create_pending_action(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                {"action": "add_linear_issue_labels", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
+            )
+            return
+
+        if action == "remove_linear_issue_labels":
+            action_id = create_pending_action(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                {"action": "remove_linear_issue_labels", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
             )
             return
 
         if action == "update_linear_issue_project":
-            issue = update_linear_issue_project(
-                issue_id=parsed["issue_id"],
-                project_name=parsed["project_name"],
-            )
-            project_name = issue["project"]["name"] if issue.get("project") else "No project"
-            await message.reply_text(
-                f"Updated project for {issue['identifier']}.\n"
-                f"Project: {project_name}\n"
-                f"Link: {issue['url']}"
-            )
-            set_last_linear_issue_id(
+            action_id = create_pending_action(
                 context,
                 update.effective_chat.id if update.effective_chat else None,
-                issue["identifier"],
+                {"action": "update_linear_issue_project", "payload": parsed},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
+            )
+            return
+
+        if action == "assign_linear_issue":
+            payload = dict(parsed)
+            contact = find_contact(payload["assignee"])
+            if contact:
+                payload["assignee"] = contact["email"]
+            action_id = create_pending_action(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                {"action": "assign_linear_issue", "payload": payload},
+            )
+            await message.reply_text(
+                build_confirmation_text(get_pending_actions(context)[action_id]),
+                reply_markup=get_confirmation_markup(action_id),
             )
             return
 
@@ -805,14 +1186,19 @@ def main() -> None:
     application.bot_data["config"] = config
     application.bot_data["selected_accounts"] = {}
     application.bot_data["last_linear_issue_ids"] = {}
+    application.bot_data["pending_actions"] = {}
     application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("members", members_command))
     application.add_handler(CommandHandler("groups", groups_command))
+    application.add_handler(CommandHandler("showmember", show_member_command))
     application.add_handler(CommandHandler("addmember", add_member_command))
     application.add_handler(CommandHandler("removemember", remove_member_command))
     application.add_handler(CommandHandler("addgroup", add_group_command))
+    application.add_handler(CommandHandler("removegroup", remove_group_command))
     application.add_handler(CallbackQueryHandler(account_callback, pattern=r"^select_account:"))
+    application.add_handler(CallbackQueryHandler(action_callback, pattern=r"^(confirm_action|cancel_action):"))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.run_polling()
 

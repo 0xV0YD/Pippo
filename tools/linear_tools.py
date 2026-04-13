@@ -1,5 +1,7 @@
 from server import mcp
 from utils.linear_client import (
+    add_linear_issue_labels,
+    assign_linear_issue,
     create_linear_issue,
     filter_linear_issues,
     format_linear_issues_readable,
@@ -10,6 +12,7 @@ from utils.linear_client import (
     list_linear_team_issues,
     list_linear_teams,
     list_my_linear_issues,
+    remove_linear_issue_labels,
     update_linear_issue_labels,
     update_linear_issue_project,
     update_linear_issue_state,
@@ -151,6 +154,28 @@ def update_linear_issue_labels_tool(issue_id: str, label_names_csv: str) -> str:
 
 
 @mcp.tool()
+def add_linear_issue_labels_tool(issue_id: str, label_names_csv: str) -> str:
+    """
+    Add labels to a Linear issue without removing the existing ones.
+    """
+    label_names = [part.strip() for part in label_names_csv.split(",") if part.strip()]
+    issue = add_linear_issue_labels(issue_id=issue_id, label_names=label_names)
+    label_text = ", ".join(label["name"] for label in issue["labels"]["nodes"]) or "no labels"
+    return f"Added labels for {issue['identifier']}: {label_text}"
+
+
+@mcp.tool()
+def remove_linear_issue_labels_tool(issue_id: str, label_names_csv: str) -> str:
+    """
+    Remove labels from a Linear issue while preserving the others.
+    """
+    label_names = [part.strip() for part in label_names_csv.split(",") if part.strip()]
+    issue = remove_linear_issue_labels(issue_id=issue_id, label_names=label_names)
+    label_text = ", ".join(label["name"] for label in issue["labels"]["nodes"]) or "no labels"
+    return f"Removed labels for {issue['identifier']}: {label_text}"
+
+
+@mcp.tool()
 def update_linear_issue_project_tool(issue_id: str, project_name: str) -> str:
     """
     Assign a Linear issue to a project by project name.
@@ -158,3 +183,13 @@ def update_linear_issue_project_tool(issue_id: str, project_name: str) -> str:
     issue = update_linear_issue_project(issue_id=issue_id, project_name=project_name)
     project_name = issue["project"]["name"] if issue.get("project") else "No project"
     return f"Updated project for {issue['identifier']}: {project_name}"
+
+
+@mcp.tool()
+def assign_linear_issue_tool(issue_id: str, assignee: str) -> str:
+    """
+    Assign a Linear issue to a user by name or email.
+    """
+    issue = assign_linear_issue(issue_id=issue_id, assignee_token=assignee)
+    assignee_name = (issue.get("assignee") or {}).get("name", "Unknown")
+    return f"Assigned {issue['identifier']} to {assignee_name}"

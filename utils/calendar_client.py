@@ -146,3 +146,107 @@ def create_google_calendar_event(
         "start": start_dt.isoformat(),
         "attendee_count": str(len(cleaned_attendees)),
     }
+
+
+def list_google_calendar_events_for_day(
+    day: str | None = None,
+    account: str | None = None,
+) -> list[dict]:
+    normalized_account = normalize_account_name(account)
+    credentials = get_google_credentials(normalized_account)
+    service = build("calendar", "v3", credentials=credentials)
+
+    if day:
+        target_day = datetime.fromisoformat(day).date()
+    else:
+        target_day = datetime.now().astimezone().date()
+
+    start_of_day = datetime.combine(target_day, datetime.min.time()).astimezone()
+    end_of_day = start_of_day + timedelta(days=1)
+
+    events = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=start_of_day.isoformat(),
+            timeMax=end_of_day.isoformat(),
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+        .get("items", [])
+    )
+
+    normalized_events = []
+    for event in events:
+        start_raw = (event.get("start") or {}).get("dateTime") or (event.get("start") or {}).get("date")
+        end_raw = (event.get("end") or {}).get("dateTime") or (event.get("end") or {}).get("date")
+        normalized_events.append(
+            {
+                "id": event.get("id", ""),
+                "title": event.get("summary", "Untitled"),
+                "start": start_raw or "",
+                "end": end_raw or "",
+                "link": event.get("htmlLink", ""),
+                "meet_link": event.get("hangoutLink", ""),
+                "attendees": [entry.get("email", "") for entry in event.get("attendees", []) if entry.get("email")],
+                "account": normalized_account,
+            }
+        )
+    return normalized_events
+
+
+def find_google_calendar_free_slots(
+    day: str | None = None,
+    duration_minutes: int = 60,
+    account: str | None = None,
+    workday_start_hour: int = 9,
+    workday_end_hour: int = 18,
+) -> list[dict]:
+    if duration_minutes <= 0:
+        raise ValueError("duration_minutes must be positive")
+
+    if day:
+        target_day = datetime.fromisoformat(day).date()
+    else:
+        target_day = datetime.now().astimezone().date()
+
+    now = datetime.now().astimezone()
+    day_start = datetime.combine(target_day, datetime.min.time()).astimezone().replace(
+        hour=workday_start_hour,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    day_end = day_start.replace(hour=workday_end_hour)
+    events = list_google_calendar_events_for_day(day=target_day.isoformat(), account=account)
+
+    busy_ranges = []
+    for event in events:
+        if "T" not in event["start"] or "T" not in event["end"]:
+            continue
+        start_dt = parse_start(event["start"])
+        end_dt = parse_start(event["end"])
+        if end_dt <= day_start or start_dt >= day_end:
+            continue
+        busy_ranges.append((max(start_dt, day_start), min(end_dt, day_end)))
+
+    busy_ranges.sort(key=lambda item: item[0])
+    merged = []
+    for start_dt, end_dt in busy_ranges:
+        if not merged or start_dt > merged[-1][1]:
+            merged.append([start_dt, end_dt])
+        else:
+            merged[-1][1] = max(merged[-1][1], end_dt)
+
+    slots = []
+    cursor = max(day_start, now) if target_day == now.date() else day_start
+    for start_dt, end_dt in merged:
+        if start_dt - cursor >= timedelta(minutes=duration_minutes):
+            slots.append({"start": cursor.isoformat(), "end": start_dt.isoformat()})
+        cursor = max(cursor, end_dt)
+
+    if day_end - cursor >= timedelta(minutes=duration_minutes):
+        slots.append({"start": cursor.isoformat(), "end": day_end.isoformat()})
+
+    return slots

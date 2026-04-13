@@ -111,6 +111,25 @@ def add_group(name: str, members: list[str]) -> dict:
     return group
 
 
+def remove_group(name: str) -> dict:
+    groups = load_groups()
+    normalized_name = name.strip().lower()
+    for index, group in enumerate(groups):
+        if group["name"].strip().lower() == normalized_name:
+            removed = groups.pop(index)
+            save_groups(groups)
+            return removed
+    raise ValueError(f"Group '{name}' not found")
+
+
+def find_group(token: str) -> dict | None:
+    needle = token.strip().lower()
+    for group in load_groups():
+        if group["name"].strip().lower() == needle:
+            return group
+    return None
+
+
 def contacts_prompt_block() -> str:
     contacts = load_contacts()
     if not contacts:
