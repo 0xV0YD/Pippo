@@ -46,6 +46,32 @@ def get_linear_viewer() -> dict:
     return linear_graphql(query)["viewer"]
 
 
+def list_linear_users() -> list[dict]:
+    query = """
+    query Users {
+      users {
+        nodes {
+          id
+          name
+          email
+          active
+        }
+      }
+    }
+    """
+    return linear_graphql(query)["users"]["nodes"]
+
+
+def get_linear_user_by_name_or_email(token: str) -> dict:
+    normalized = token.strip().lower()
+    for user in list_linear_users():
+        if not user.get("active", True):
+            continue
+        if user["email"].strip().lower() == normalized or user["name"].strip().lower() == normalized:
+            return user
+    raise ValueError(f"Linear user '{token}' not found")
+
+
 def list_linear_teams() -> list[dict]:
     query = """
     query Teams {
@@ -443,6 +469,52 @@ def update_linear_issue_labels(issue_id: str, label_names: list[str]) -> dict:
     return result["issue"]
 
 
+def add_linear_issue_labels(issue_id: str, label_names: list[str]) -> dict:
+    issue = get_linear_issue(issue_id)
+    current_ids = [label["id"] for label in issue["labels"]["nodes"]]
+    team = issue.get("team")
+    for label_name in label_names:
+        label = get_linear_label_by_name(label_name, team_id=(team or {}).get("id"))
+        if label["id"] not in current_ids:
+            current_ids.append(label["id"])
+    return _update_issue_fields(
+        issue_id=issue_id,
+        input_data={"labelIds": current_ids},
+        selection="""
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        """,
+        error_message="Linear issue label update failed",
+    )
+
+
+def remove_linear_issue_labels(issue_id: str, label_names: list[str]) -> dict:
+    issue = get_linear_issue(issue_id)
+    remove_names = {label_name.strip().lower() for label_name in label_names if label_name.strip()}
+    remaining_ids = [
+        label["id"]
+        for label in issue["labels"]["nodes"]
+        if label["name"].strip().lower() not in remove_names
+    ]
+    return _update_issue_fields(
+        issue_id=issue_id,
+        input_data={"labelIds": remaining_ids},
+        selection="""
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        """,
+        error_message="Linear issue label removal failed",
+    )
+
+
 def update_linear_issue_project(issue_id: str, project_name: str) -> dict:
     project = get_linear_project_by_name(project_name)
     mutation = """
@@ -471,4 +543,41 @@ def update_linear_issue_project(issue_id: str, project_name: str) -> dict:
     )["issueUpdate"]
     if not result.get("success") or not result.get("issue"):
         raise ValueError("Linear issue project update failed")
+    return result["issue"]
+
+
+def assign_linear_issue(issue_id: str, assignee_token: str) -> dict:
+    user = get_linear_user_by_name_or_email(assignee_token)
+    return _update_issue_fields(
+        issue_id=issue_id,
+        input_data={"assigneeId": user["id"]},
+        selection="""
+          assignee {
+            id
+            name
+            email
+          }
+        """,
+        error_message="Linear issue assignee update failed",
+    )
+
+
+def _update_issue_fields(issue_id: str, input_data: dict, selection: str, error_message: str) -> dict:
+    mutation = f"""
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {{
+      issueUpdate(id: $id, input: $input) {{
+        success
+        issue {{
+          id
+          identifier
+          title
+          url
+          {selection}
+        }}
+      }}
+    }}
+    """
+    result = linear_graphql(mutation, {"id": issue_id, "input": input_data})["issueUpdate"]
+    if not result.get("success") or not result.get("issue"):
+        raise ValueError(error_message)
     return result["issue"]
