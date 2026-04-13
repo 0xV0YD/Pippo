@@ -21,11 +21,17 @@ from utils.linear_client import (
     create_linear_issue,
     filter_linear_issues,
     format_linear_issues_readable,
+    get_linear_issue,
+    list_linear_labels,
+    list_linear_projects,
     get_linear_team_by_key,
     get_linear_viewer,
     list_linear_team_issues,
     list_linear_teams,
     list_my_linear_issues,
+    update_linear_issue_labels,
+    update_linear_issue_project,
+    update_linear_issue_state,
 )
 
 
@@ -49,6 +55,11 @@ Supported JSON shapes:
 {"action":"list_my_linear_assigned_issues","limit":20}
 {"action":"list_linear_issues","team_key":"ENG","limit":20}
 {"action":"create_linear_issue","team_key":"ENG","title":"...","description":"...","assign_to_me":true}
+{"action":"update_linear_issue_state","issue_id":"ANT-147","state_name":"In Progress"}
+{"action":"list_linear_projects"}
+{"action":"list_linear_labels"}
+{"action":"update_linear_issue_labels","issue_id":"ANT-147","label_names":["Bug","Urgent"]}
+{"action":"update_linear_issue_project","issue_id":"ANT-147","project_name":"Monitoring"}
 Rules:
 - Only return JSON.
 - The start value must always include a timezone offset.
@@ -57,6 +68,11 @@ Rules:
 - For "my issues" in Linear, use action "list_my_linear_assigned_issues".
 - For "list issues in ORG" use action "list_linear_issues" and extract the team key.
 - For "create a linear issue" use action "create_linear_issue".
+- For "move ANT-147 to In Progress" or "change ANT-147 to Done" use action "update_linear_issue_state".
+- For "show linear projects" use action "list_linear_projects".
+- For "show linear labels" use action "list_linear_labels".
+- For "add label Bug to ANT-147" use action "update_linear_issue_labels".
+- For "add ANT-147 to project Monitoring" use action "update_linear_issue_project".
 - If limit is not specified for Linear list actions, use 20.
 - If any required field is missing or ambiguous, return:
 {"action":"needs_clarification","question":"..."}
@@ -102,6 +118,20 @@ def get_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None
 def set_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int, account: str) -> None:
     selected_accounts = context.application.bot_data.setdefault("selected_accounts", {})
     selected_accounts[chat_id] = account
+
+
+def get_last_linear_issue_id(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None) -> str | None:
+    if chat_id is None:
+        return None
+    last_issue_ids = context.application.bot_data.setdefault("last_linear_issue_ids", {})
+    return last_issue_ids.get(chat_id)
+
+
+def set_last_linear_issue_id(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None, issue_id: str) -> None:
+    if chat_id is None:
+        return
+    last_issue_ids = context.application.bot_data.setdefault("last_linear_issue_ids", {})
+    last_issue_ids[chat_id] = issue_id
 
 
 def load_config() -> BotConfig:
@@ -164,15 +194,31 @@ def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
     return json.loads(text)
 
 
-def parse_linear_filters(user_message: str) -> dict | None:
+def parse_linear_filters(user_message: str, last_issue_id: str | None = None) -> dict | None:
     text = user_message.strip()
     lowered = text.lower()
+    if re.search(r"\b[A-Z]{2,10}-\d+\b", text):
+        has_linear_signal = True
+    else:
+        has_linear_signal = False
 
-    if "linear" not in lowered and "issue" not in lowered and "issues" not in lowered and "org" not in lowered:
+    if (
+        "linear" not in lowered
+        and "issue" not in lowered
+        and "issues" not in lowered
+        and "org" not in lowered
+        and not has_linear_signal
+    ):
         return None
 
     if any(phrase in lowered for phrase in ["my linear orgs", "show my linear orgs", "show linear orgs", "linear orgs"]):
         return {"action": "list_linear_orgs"}
+
+    if any(phrase in lowered for phrase in ["linear projects", "show projects", "list projects"]):
+        return {"action": "list_linear_projects"}
+
+    if any(phrase in lowered for phrase in ["linear labels", "show labels", "list labels"]):
+        return {"action": "list_linear_labels"}
 
     team_key = None
     try:
@@ -195,7 +241,48 @@ def parse_linear_filters(user_message: str) -> dict | None:
         if alias in lowered and canonical not in state_filters:
             state_filters.append(canonical)
 
+    issue_id_match = re.search(r"\b([A-Z]{2,10}-\d+)\b", text)
+    issue_id = issue_id_match.group(1).upper() if issue_id_match else None
+    if issue_id is None and "this issue" in lowered:
+        issue_id = last_issue_id
+
     only_mine = any(phrase in lowered for phrase in ["only my", "only mine", "my issues", "assigned to me", "mine"])
+
+    if issue_id and state_filters and any(word in lowered for word in ["change", "move", "update", "set", "label", "status", "state"]):
+        target_state = state_filters[0]
+        to_match = re.search(r"\bto\s+([a-z ]+)$", lowered)
+        if to_match:
+            to_segment = to_match.group(1).strip()
+            for alias, canonical in LINEAR_STATE_ALIASES.items():
+                if alias in to_segment:
+                    target_state = canonical
+                    break
+        return {
+            "action": "update_linear_issue_state",
+            "issue_id": issue_id,
+            "state_name": target_state,
+        }
+
+    if issue_id and any(word in lowered for word in ["label", "labels"]):
+        label_match = re.search(r"\blabels?\s+(.+?)(?:\s+(?:to|for|on)\s+|$)", text, re.IGNORECASE)
+        if label_match:
+            raw_labels = label_match.group(1)
+            label_names = [part.strip().strip('"').strip("'") for part in re.split(r",| and ", raw_labels) if part.strip()]
+            if label_names:
+                return {
+                    "action": "update_linear_issue_labels",
+                    "issue_id": issue_id,
+                    "label_names": label_names,
+                }
+
+    if issue_id and "project" in lowered:
+        project_match = re.search(r"\bproject\s+(.+)$", text, re.IGNORECASE)
+        if project_match:
+            return {
+                "action": "update_linear_issue_project",
+                "issue_id": issue_id,
+                "project_name": project_match.group(1).strip().strip('"').strip("'"),
+            }
 
     if "create" in lowered and "issue" in lowered:
         title_match = (
@@ -341,7 +428,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     try:
-        parsed = parse_linear_filters(message.text) or call_gemini_for_action(config, message.text)
+        parsed = parse_linear_filters(
+            message.text,
+            last_issue_id=get_last_linear_issue_id(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+            ),
+        ) or call_gemini_for_action(config, message.text)
         action = parsed.get("action")
 
         if action == "needs_clarification":
@@ -374,6 +467,30 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             )
             return
 
+        if action == "list_linear_projects":
+            projects = list_linear_projects()
+            if not projects:
+                await message.reply_text("No Linear projects found.")
+            else:
+                await message.reply_text(
+                    "Linear projects:\n" + "\n".join(f"- {p['name']}\n  {p['url']}" for p in projects)
+                )
+            return
+
+        if action == "list_linear_labels":
+            labels = list_linear_labels()
+            if not labels:
+                await message.reply_text("No Linear labels found.")
+            else:
+                await message.reply_text(
+                    "Linear labels:\n"
+                    + "\n".join(
+                        f"- {label['name']} [{(label.get('team') or {}).get('key', 'workspace')}]"
+                        for label in labels
+                    )
+                )
+            return
+
         if action == "list_my_linear_assigned_issues":
             issues = list_my_linear_issues(limit=max(int(parsed.get("limit", 20)), 50))
             filtered = filter_linear_issues(
@@ -386,6 +503,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if parsed.get("team_key"):
                 heading = f"Your Linear issues in {parsed['team_key'].upper()}:"
             await message.reply_text(format_linear_issues_readable(filtered, heading=heading))
+            if filtered:
+                set_last_linear_issue_id(
+                    context,
+                    update.effective_chat.id if update.effective_chat else None,
+                    filtered[0]["identifier"],
+                )
             return
 
         if action == "list_linear_issues":
@@ -403,6 +526,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if parsed.get("only_mine"):
                 heading = f"Your Linear issues in {team_key.upper()}:"
             await message.reply_text(format_linear_issues_readable(filtered, heading=heading))
+            if filtered:
+                set_last_linear_issue_id(
+                    context,
+                    update.effective_chat.id if update.effective_chat else None,
+                    filtered[0]["identifier"],
+                )
             return
 
         if action == "create_linear_issue":
@@ -419,6 +548,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"Title: {issue['title']}\n"
                 f"Link: {issue['url']}"
             )
+            set_last_linear_issue_id(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                issue["identifier"],
+            )
+            return
+
+        if action == "update_linear_issue_state":
+            issue = update_linear_issue_state(
+                issue_id=parsed["issue_id"],
+                state_name=parsed["state_name"],
+            )
+            await message.reply_text(
+                f"Updated {issue['identifier']} to {issue['state']['name']}.\n"
+                f"Title: {issue['title']}\n"
+                f"Link: {issue['url']}"
+            )
+            set_last_linear_issue_id(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                issue["identifier"],
+            )
+            return
+
+        if action == "update_linear_issue_labels":
+            issue = update_linear_issue_labels(
+                issue_id=parsed["issue_id"],
+                label_names=parsed["label_names"],
+            )
+            label_text = ", ".join(label["name"] for label in issue["labels"]["nodes"]) or "no labels"
+            await message.reply_text(
+                f"Updated labels for {issue['identifier']}.\n"
+                f"Labels: {label_text}\n"
+                f"Link: {issue['url']}"
+            )
+            set_last_linear_issue_id(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                issue["identifier"],
+            )
+            return
+
+        if action == "update_linear_issue_project":
+            issue = update_linear_issue_project(
+                issue_id=parsed["issue_id"],
+                project_name=parsed["project_name"],
+            )
+            project_name = issue["project"]["name"] if issue.get("project") else "No project"
+            await message.reply_text(
+                f"Updated project for {issue['identifier']}.\n"
+                f"Project: {project_name}\n"
+                f"Link: {issue['url']}"
+            )
+            set_last_linear_issue_id(
+                context,
+                update.effective_chat.id if update.effective_chat else None,
+                issue["identifier"],
+            )
             return
 
         raise ValueError(f"Unexpected Gemini action: {action}")
@@ -432,6 +619,7 @@ def main() -> None:
     application = Application.builder().token(config.telegram_bot_token).build()
     application.bot_data["config"] = config
     application.bot_data["selected_accounts"] = {}
+    application.bot_data["last_linear_issue_ids"] = {}
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CallbackQueryHandler(account_callback, pattern=r"^select_account:"))

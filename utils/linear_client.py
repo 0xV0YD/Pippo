@@ -70,6 +70,134 @@ def get_linear_team_by_key(team_key: str) -> dict:
     raise ValueError(f"Linear team '{team_key}' not found")
 
 
+def get_linear_issue(issue_id: str) -> dict:
+    query = """
+    query Issue($id: String!) {
+      issue(id: $id) {
+        id
+        identifier
+        title
+        url
+        team {
+          id
+          key
+          name
+        }
+        state {
+          id
+          name
+        }
+        assignee {
+          id
+          name
+        }
+        project {
+          id
+          name
+        }
+        labels {
+          nodes {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    issue = linear_graphql(query, {"id": issue_id})["issue"]
+    if issue is None:
+        raise ValueError(f"Linear issue '{issue_id}' not found")
+    return issue
+
+
+def get_linear_team_states(team_id: str) -> list[dict]:
+    query = """
+    query TeamStates($teamId: String!) {
+      team(id: $teamId) {
+        id
+        key
+        states {
+          nodes {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    team = linear_graphql(query, {"teamId": team_id})["team"]
+    if team is None:
+        raise ValueError(f"Linear team '{team_id}' not found")
+    return team["states"]["nodes"]
+
+
+def list_linear_projects() -> list[dict]:
+    query = """
+    query Projects {
+      projects {
+        nodes {
+          id
+          name
+          url
+        }
+      }
+    }
+    """
+    return linear_graphql(query)["projects"]["nodes"]
+
+
+def get_linear_project_by_name(project_name: str) -> dict:
+    normalized = project_name.strip().lower()
+    for project in list_linear_projects():
+        if project["name"].strip().lower() == normalized:
+            return project
+    raise ValueError(f"Linear project '{project_name}' not found")
+
+
+def list_linear_labels() -> list[dict]:
+    query = """
+    query IssueLabels {
+      issueLabels {
+        nodes {
+          id
+          name
+          team {
+            id
+            key
+            name
+          }
+        }
+      }
+    }
+    """
+    return linear_graphql(query)["issueLabels"]["nodes"]
+
+
+def get_linear_label_by_name(label_name: str, team_id: str | None = None) -> dict:
+    normalized = label_name.strip().lower()
+    labels = list_linear_labels()
+
+    if team_id:
+        team_labels = [label for label in labels if (label.get("team") or {}).get("id") == team_id]
+        for label in team_labels:
+            if label["name"].strip().lower() == normalized:
+                return label
+
+    for label in labels:
+        if label["name"].strip().lower() == normalized:
+            return label
+
+    raise ValueError(f"Linear label '{label_name}' not found")
+
+
+def get_linear_state_by_name(team_id: str, state_name: str) -> dict:
+    normalized = state_name.strip().lower()
+    for state in get_linear_team_states(team_id):
+        if state["name"].strip().lower() == normalized:
+            return state
+    raise ValueError(f"Linear state '{state_name}' not found for this team")
+
+
 def list_linear_team_issues(team_key: str, limit: int = 20) -> list[dict]:
     team = get_linear_team_by_key(team_key)
     query = """
@@ -237,4 +365,110 @@ def create_linear_issue(
     result = linear_graphql(mutation, {"input": input_data})["issueCreate"]
     if not result.get("success") or not result.get("issue"):
         raise ValueError("Linear issue creation failed")
+    return result["issue"]
+
+
+def update_linear_issue_state(issue_id: str, state_name: str) -> dict:
+    issue = get_linear_issue(issue_id)
+    team = issue.get("team")
+    if not team:
+        raise ValueError(f"Linear issue '{issue_id}' has no team")
+
+    state = get_linear_state_by_name(team["id"], state_name)
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue {
+          id
+          identifier
+          title
+          url
+          state {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    result = linear_graphql(
+        mutation,
+        {
+            "id": issue_id,
+            "input": {"stateId": state["id"]},
+        },
+    )["issueUpdate"]
+    if not result.get("success") or not result.get("issue"):
+        raise ValueError("Linear issue update failed")
+    return result["issue"]
+
+
+def update_linear_issue_labels(issue_id: str, label_names: list[str]) -> dict:
+    issue = get_linear_issue(issue_id)
+    team = issue.get("team")
+    label_ids = []
+    for label_name in label_names:
+        label = get_linear_label_by_name(label_name, team_id=(team or {}).get("id"))
+        label_ids.append(label["id"])
+
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue {
+          id
+          identifier
+          title
+          url
+          labels {
+            nodes {
+              id
+              name
+            }
+          }
+        }
+      }
+    }
+    """
+    result = linear_graphql(
+        mutation,
+        {
+            "id": issue_id,
+            "input": {"labelIds": label_ids},
+        },
+    )["issueUpdate"]
+    if not result.get("success") or not result.get("issue"):
+        raise ValueError("Linear issue label update failed")
+    return result["issue"]
+
+
+def update_linear_issue_project(issue_id: str, project_name: str) -> dict:
+    project = get_linear_project_by_name(project_name)
+    mutation = """
+    mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) {
+      issueUpdate(id: $id, input: $input) {
+        success
+        issue {
+          id
+          identifier
+          title
+          url
+          project {
+            id
+            name
+          }
+        }
+      }
+    }
+    """
+    result = linear_graphql(
+        mutation,
+        {
+            "id": issue_id,
+            "input": {"projectId": project["id"]},
+        },
+    )["issueUpdate"]
+    if not result.get("success") or not result.get("issue"):
+        raise ValueError("Linear issue project update failed")
     return result["issue"]
