@@ -58,3 +58,17 @@ Notes:
 - Fill in `.env` before starting.
 - Keep your `credentials/google_oauth_client_<alias>.json` files present on the host.
 - `credentials/google_token_<alias>.json` files are persisted through the mounted `credentials/` folder.
+
+# Linear Setup
+
+Add your Linear personal API key to `.env`:
+
+- `LINEAR_API_KEY`
+
+Available MCP tools:
+
+- `get_linear_profile()`
+- `list_linear_orgs()`
+- `list_linear_issues(team_key, limit=20)`
+- `list_my_linear_assigned_issues(limit=20)`
+- `create_linear_issue_tool(team_id, title, description="", assignee_id="")`
