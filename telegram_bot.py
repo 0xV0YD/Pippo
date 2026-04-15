@@ -44,6 +44,7 @@ from utils.linear_client import (
     list_linear_labels,
     list_linear_projects,
     get_linear_team_by_key,
+    get_linear_user_by_name_or_email,
     get_linear_viewer,
     list_linear_team_issues,
     list_linear_teams,
@@ -111,7 +112,7 @@ Supported JSON shapes:
 {"action":"list_linear_orgs"}
 {"action":"list_my_linear_assigned_issues","limit":20}
 {"action":"list_linear_issues","team_key":"ENG","limit":20}
-{"action":"create_linear_issue","team_key":"ENG","title":"...","description":"...","assign_to_me":true}
+{"action":"create_linear_issue","team_key":"ENG","title":"...","description":"...","assign_to_me":true,"assignee":"akshat@anthias.xyz","state_name":"In Progress"}
 {"action":"update_linear_issue_state","issue_id":"ANT-147","state_name":"In Progress"}
 {"action":"list_linear_projects"}
 {"action":"list_linear_labels"}
@@ -130,6 +131,7 @@ Rules:
 - For "my issues" in Linear, use action "list_my_linear_assigned_issues".
 - For "list issues in ORG" use action "list_linear_issues" and extract the team key.
 - For "create a linear issue" use action "create_linear_issue".
+- Treat "task" as the same as a Linear issue.
 - For "move ANT-147 to In Progress" or "change ANT-147 to Done" use action "update_linear_issue_state".
 - For "show linear projects" use action "list_linear_projects".
 - For "show linear labels" use action "list_linear_labels".
@@ -387,6 +389,8 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
         "linear" not in lowered
         and "issue" not in lowered
         and "issues" not in lowered
+        and "task" not in lowered
+        and "tasks" not in lowered
         and "org" not in lowered
         and not has_linear_signal
     ):
@@ -479,15 +483,18 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
                 "project_name": project_match.group(1).strip().strip('"').strip("'"),
             }
 
-    if "create" in lowered and "issue" in lowered:
+    if "create" in lowered and ("issue" in lowered or "task" in lowered):
         title_match = (
             re.search(r'\b(?:heading|title)\s+"([^"]+)"', text, re.IGNORECASE)
             or re.search(r"\b(?:heading|title)\s+'([^']+)'", text, re.IGNORECASE)
             or re.search(r"\b(?:heading|title)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
             or re.search(r"\bissue\s+(?:called|named)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
+            or re.search(r"\btask\s+(?:called|named)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
         )
         description_match = re.search(r"\bdescription\s+(.+)$", text, re.IGNORECASE)
         assign_to_me = "assign it to me" in lowered or "assign to me" in lowered or "for me" in lowered
+        assignee_match = re.search(r"\bassign(?:\s+it)?\s+to\s+(.+?)(?:\s+and\s+|\s+with\s+|\s+in\s+|\s+state\s+|$)", text, re.IGNORECASE)
+        explicit_state = next((canonical for alias, canonical in LINEAR_STATE_ALIASES.items() if alias in lowered), "")
         if team_key and title_match:
             return {
                 "action": "create_linear_issue",
@@ -495,6 +502,8 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
                 "title": title_match.group(1).strip().strip('"').strip("'"),
                 "description": description_match.group(1).strip() if description_match else "",
                 "assign_to_me": assign_to_me,
+                "assignee": assignee_match.group(1).strip().strip('"').strip("'") if assignee_match else "",
+                "state_name": explicit_state,
             }
         return {
             "action": "needs_clarification",
@@ -862,7 +871,16 @@ def build_confirmation_text(spec: dict) -> str:
             f"Attendees: {', '.join(payload['attendees'])}"
         )
     if action == "create_linear_issue":
-        return f"Confirm Linear issue creation?\nTeam: {payload['team_key']}\nTitle: {payload['title']}"
+        lines = [
+            "Confirm Linear issue creation?",
+            f"Team: {payload['team_key']}",
+            f"Title: {payload['title']}",
+        ]
+        if payload.get("assignee"):
+            lines.append(f"Assignee: {payload['assignee']}")
+        if payload.get("state_name"):
+            lines.append(f"State: {payload['state_name']}")
+        return "\n".join(lines)
     if action == "update_linear_issue_state":
         return f"Confirm moving {payload['issue_id']} to {payload['state_name']}?"
     if action in {"update_linear_issue_labels", "add_linear_issue_labels", "remove_linear_issue_labels"}:
@@ -901,12 +919,21 @@ async def execute_pending_action(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     if action == "create_linear_issue":
         team = get_linear_team_by_key(payload["team_key"])
         viewer = get_linear_viewer()
+        assignee_id = None
+        if payload.get("assign_to_me"):
+            assignee_id = viewer["id"]
+        elif payload.get("assignee"):
+            assignee_contact = find_contact(payload["assignee"])
+            assignee_token = assignee_contact["email"] if assignee_contact else payload["assignee"]
+            assignee_id = get_linear_user_by_name_or_email(assignee_token)["id"]
         issue = create_linear_issue(
             team_id=team["id"],
             title=payload["title"],
             description=payload.get("description", ""),
-            assignee_id=viewer["id"] if payload.get("assign_to_me") else None,
+            assignee_id=assignee_id,
         )
+        if payload.get("state_name"):
+            issue = update_linear_issue_state(issue_id=issue["identifier"], state_name=payload["state_name"])
         set_last_linear_issue_id(context, chat_id, issue["identifier"])
         return f"Created Linear issue {issue['identifier']} in {team['key']}.\nTitle: {issue['title']}\nLink: {issue['url']}"
     if action == "update_linear_issue_state":
@@ -954,6 +981,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update.effective_chat.id if update.effective_chat else None,
             ),
         ) or call_ai_for_action(config, message.text)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"AI returned an unexpected shape: {type(parsed).__name__}. Expected a JSON object.")
         action = parsed.get("action")
 
         if action == "needs_clarification":

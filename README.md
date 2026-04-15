@@ -177,6 +177,10 @@ make down
 - [main.py](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/main.py:1): MCP entrypoint
 - [server.py](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/server.py:1): shared FastMCP instance
 
+### Knowledge / RAG Prep
+- [knowledge/README.md](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/knowledge/README.md:1)
+- [docs/rag-learning-plan.md](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/docs/rag-learning-plan.md:1)
+
 ### Google Calendar
 - [utils/calendar_client.py](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/utils/calendar_client.py:1)
 - [tools/calendar_tools.py](/home/glitch/Desktop/anthias/DCS/Agents/Proj3/tools/calendar_tools.py:1)
