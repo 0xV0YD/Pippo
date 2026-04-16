@@ -1,0 +1,194 @@
+[
+  {
+    "meeting_id": "meet_2026_04_10_infra_sync",
+    "title": "Infra Sync",
+    "date": "2026-04-10",
+    "start_time": "2026-04-10T16:00:00+05:30",
+    "end_time": "2026-04-10T17:00:00+05:30",
+    "calendar_account": "work",
+    "attendees": [
+      "vasu@anthias.xyz",
+      "akshat@anthias.xyz",
+      "vansh@anthias.xyz"
+    ],
+    "groups_used": [
+      "infra"
+    ],
+    "tags": [
+      "infra",
+      "monitoring",
+      "lighter-integration"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_10_infra_sync::overview",
+    "chunk_type": "overview",
+    "text": "Meeting: Infra Sync\nDate: 2026-04-10\nTime: 2026-04-10T16:00:00+05:30 to 2026-04-10T17:00:00+05:30\nCalendar Account: work\nAttendees: vasu@anthias.xyz, akshat@anthias.xyz, vansh@anthias.xyz\nGroups Used: infra\nSummary: The team reviewed monitoring gaps and discussed the lighter integration rollout scope.\nTags: infra, monitoring, lighter-integration"
+  },
+  {
+    "meeting_id": "meet_2026_04_10_infra_sync",
+    "title": "Infra Sync",
+    "date": "2026-04-10",
+    "start_time": "2026-04-10T16:00:00+05:30",
+    "end_time": "2026-04-10T17:00:00+05:30",
+    "calendar_account": "work",
+    "attendees": [
+      "vasu@anthias.xyz",
+      "akshat@anthias.xyz",
+      "vansh@anthias.xyz"
+    ],
+    "groups_used": [
+      "infra"
+    ],
+    "tags": [
+      "infra",
+      "monitoring",
+      "lighter-integration"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_10_infra_sync::decisions",
+    "chunk_type": "decisions",
+    "text": "Meeting: Infra Sync\nDate: 2026-04-10\nDecisions:\n- Use a clearer naming convention for recurring infra syncs.\n- Track lighter integration follow-ups inside the ANT Linear team."
+  },
+  {
+    "meeting_id": "meet_2026_04_10_infra_sync",
+    "title": "Infra Sync",
+    "date": "2026-04-10",
+    "start_time": "2026-04-10T16:00:00+05:30",
+    "end_time": "2026-04-10T17:00:00+05:30",
+    "calendar_account": "work",
+    "attendees": [
+      "vasu@anthias.xyz",
+      "akshat@anthias.xyz",
+      "vansh@anthias.xyz"
+    ],
+    "groups_used": [
+      "infra"
+    ],
+    "tags": [
+      "infra",
+      "monitoring",
+      "lighter-integration"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_10_infra_sync::action_items",
+    "chunk_type": "action_items",
+    "text": "Meeting: Infra Sync\nDate: 2026-04-10\nAction Items:\n- Owner: akshat@anthias.xyz | Task: Draft the lighter integration implementation spec | Status: open\n- Owner: vansh@anthias.xyz | Task: Map current monitoring gaps before next sync | Status: open"
+  },
+  {
+    "meeting_id": "meet_2026_04_10_infra_sync",
+    "title": "Infra Sync",
+    "date": "2026-04-10",
+    "start_time": "2026-04-10T16:00:00+05:30",
+    "end_time": "2026-04-10T17:00:00+05:30",
+    "calendar_account": "work",
+    "attendees": [
+      "vasu@anthias.xyz",
+      "akshat@anthias.xyz",
+      "vansh@anthias.xyz"
+    ],
+    "groups_used": [
+      "infra"
+    ],
+    "tags": [
+      "infra",
+      "monitoring",
+      "lighter-integration"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_10_infra_sync::open_questions",
+    "chunk_type": "open_questions",
+    "text": "Meeting: Infra Sync\nDate: 2026-04-10\nOpen Questions:\n- Should rollout monitoring live in an existing project or a new one?\n- Who owns the lighter integration spec long term?"
+  },
+  {
+    "meeting_id": "meet_2026_04_14_product_review",
+    "title": "Product Review",
+    "date": "2026-04-14",
+    "start_time": "2026-04-14T15:30:00+05:30",
+    "end_time": "2026-04-14T16:15:00+05:30",
+    "calendar_account": "default",
+    "attendees": [
+      "vaishnavi@anthias.xyz",
+      "aaron@anthias.xyz",
+      "charlie@anthias.xyz"
+    ],
+    "groups_used": [],
+    "tags": [
+      "product",
+      "ux",
+      "pippo"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_14_product_review::overview",
+    "chunk_type": "overview",
+    "text": "Meeting: Product Review\nDate: 2026-04-14\nTime: 2026-04-14T15:30:00+05:30 to 2026-04-14T16:15:00+05:30\nCalendar Account: default\nAttendees: vaishnavi@anthias.xyz, aaron@anthias.xyz, charlie@anthias.xyz\nGroups Used: None\nSummary: The review focused on user-facing polish for Pippo, including command discoverability and safer action confirmations.\nTags: product, ux, pippo"
+  },
+  {
+    "meeting_id": "meet_2026_04_14_product_review",
+    "title": "Product Review",
+    "date": "2026-04-14",
+    "start_time": "2026-04-14T15:30:00+05:30",
+    "end_time": "2026-04-14T16:15:00+05:30",
+    "calendar_account": "default",
+    "attendees": [
+      "vaishnavi@anthias.xyz",
+      "aaron@anthias.xyz",
+      "charlie@anthias.xyz"
+    ],
+    "groups_used": [],
+    "tags": [
+      "product",
+      "ux",
+      "pippo"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_14_product_review::decisions",
+    "chunk_type": "decisions",
+    "text": "Meeting: Product Review\nDate: 2026-04-14\nDecisions:\n- Add a /help command so users do not need to memorize every capability.\n- Keep confirmation buttons for high-impact calendar and Linear mutations."
+  },
+  {
+    "meeting_id": "meet_2026_04_14_product_review",
+    "title": "Product Review",
+    "date": "2026-04-14",
+    "start_time": "2026-04-14T15:30:00+05:30",
+    "end_time": "2026-04-14T16:15:00+05:30",
+    "calendar_account": "default",
+    "attendees": [
+      "vaishnavi@anthias.xyz",
+      "aaron@anthias.xyz",
+      "charlie@anthias.xyz"
+    ],
+    "groups_used": [],
+    "tags": [
+      "product",
+      "ux",
+      "pippo"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_14_product_review::action_items",
+    "chunk_type": "action_items",
+    "text": "Meeting: Product Review\nDate: 2026-04-14\nAction Items:\n- Owner: charlie@anthias.xyz | Task: Review the help text for clarity and tone | Status: open\n- Owner: aaron@anthias.xyz | Task: List future product ideas for knowledge-aware Pippo | Status: open"
+  },
+  {
+    "meeting_id": "meet_2026_04_14_product_review",
+    "title": "Product Review",
+    "date": "2026-04-14",
+    "start_time": "2026-04-14T15:30:00+05:30",
+    "end_time": "2026-04-14T16:15:00+05:30",
+    "calendar_account": "default",
+    "attendees": [
+      "vaishnavi@anthias.xyz",
+      "aaron@anthias.xyz",
+      "charlie@anthias.xyz"
+    ],
+    "groups_used": [],
+    "tags": [
+      "product",
+      "ux",
+      "pippo"
+    ],
+    "source": "mock_seed",
+    "chunk_id": "meet_2026_04_14_product_review::open_questions",
+    "chunk_type": "open_questions",
+    "text": "Meeting: Product Review\nDate: 2026-04-14\nOpen Questions:\n- Should Pippo later summarize old meeting decisions automatically?\n- Should recurring meeting templates be stored as reusable presets?"
+  }
+]

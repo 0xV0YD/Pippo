@@ -1,0 +1,90 @@
+[
+  {
+    "id": "meet_2026_04_10_infra_sync",
+    "title": "Infra Sync",
+    "date": "2026-04-10",
+    "start_time": "2026-04-10T16:00:00+05:30",
+    "end_time": "2026-04-10T17:00:00+05:30",
+    "calendar_account": "work",
+    "attendees": [
+      "vasu@anthias.xyz",
+      "akshat@anthias.xyz",
+      "vansh@anthias.xyz"
+    ],
+    "groups_used": [
+      "infra"
+    ],
+    "meet_link": "https://meet.google.com/mock-infra-sync",
+    "calendar_event_link": "https://calendar.google.com/event?eid=mock-infra-sync",
+    "summary": "The team reviewed monitoring gaps and discussed the lighter integration rollout scope.",
+    "decisions": [
+      "Use a clearer naming convention for recurring infra syncs.",
+      "Track lighter integration follow-ups inside the ANT Linear team."
+    ],
+    "action_items": [
+      {
+        "owner": "akshat@anthias.xyz",
+        "task": "Draft the lighter integration implementation spec",
+        "status": "open"
+      },
+      {
+        "owner": "vansh@anthias.xyz",
+        "task": "Map current monitoring gaps before next sync",
+        "status": "open"
+      }
+    ],
+    "open_questions": [
+      "Should rollout monitoring live in an existing project or a new one?",
+      "Who owns the lighter integration spec long term?"
+    ],
+    "tags": [
+      "infra",
+      "monitoring",
+      "lighter-integration"
+    ],
+    "source": "mock_seed"
+  },
+  {
+    "id": "meet_2026_04_14_product_review",
+    "title": "Product Review",
+    "date": "2026-04-14",
+    "start_time": "2026-04-14T15:30:00+05:30",
+    "end_time": "2026-04-14T16:15:00+05:30",
+    "calendar_account": "default",
+    "attendees": [
+      "vaishnavi@anthias.xyz",
+      "aaron@anthias.xyz",
+      "charlie@anthias.xyz"
+    ],
+    "groups_used": [],
+    "meet_link": "https://meet.google.com/mock-product-review",
+    "calendar_event_link": "https://calendar.google.com/event?eid=mock-product-review",
+    "summary": "The review focused on user-facing polish for Pippo, including command discoverability and safer action confirmations.",
+    "decisions": [
+      "Add a /help command so users do not need to memorize every capability.",
+      "Keep confirmation buttons for high-impact calendar and Linear mutations."
+    ],
+    "action_items": [
+      {
+        "owner": "charlie@anthias.xyz",
+        "task": "Review the help text for clarity and tone",
+        "status": "open"
+      },
+      {
+        "owner": "aaron@anthias.xyz",
+        "task": "List future product ideas for knowledge-aware Pippo",
+        "status": "open"
+      }
+    ],
+    "open_questions": [
+      "Should Pippo later summarize old meeting decisions automatically?",
+      "Should recurring meeting templates be stored as reusable presets?"
+    ],
+    "tags": [
+      "product",
+      "ux",
+      "pippo"
+    ],
+    "source": "mock_seed"
+  }
+]

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -17,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from utils.api_config import get_google_generative_language_base_url, get_openai_base_url
 from utils.calendar_client import (
     create_google_calendar_event,
     find_google_calendar_free_slots,
@@ -44,6 +47,7 @@ from utils.linear_client import (
     list_linear_labels,
     list_linear_projects,
     get_linear_team_by_key,
+    get_linear_user_by_name_or_email,
     get_linear_viewer,
     list_linear_team_issues,
     list_linear_teams,
@@ -53,6 +57,7 @@ from utils.linear_client import (
     update_linear_issue_project,
     update_linear_issue_state,
 )
+from utils.rag_answerer import answer_from_meeting_context, format_user_rag_answer
 
 
 logging.basicConfig(
@@ -76,6 +81,10 @@ Calendar
 - find free slots today
 - find free slots on 2026-04-14 for 30 minutes
 - schedule a sync with infra tomorrow at 4pm IST named Infra Sync
+
+Meeting knowledge
+- /askmeetings what did we decide about monitoring?
+- ask meetings what are the open questions from product review?
 
 Members and groups
 - /members
@@ -111,7 +120,7 @@ Supported JSON shapes:
 {"action":"list_linear_orgs"}
 {"action":"list_my_linear_assigned_issues","limit":20}
 {"action":"list_linear_issues","team_key":"ENG","limit":20}
-{"action":"create_linear_issue","team_key":"ENG","title":"...","description":"...","assign_to_me":true}
+{"action":"create_linear_issue","team_key":"ENG","title":"...","description":"...","assign_to_me":true,"assignee":"akshat@anthias.xyz","state_name":"In Progress"}
 {"action":"update_linear_issue_state","issue_id":"ANT-147","state_name":"In Progress"}
 {"action":"list_linear_projects"}
 {"action":"list_linear_labels"}
@@ -122,6 +131,7 @@ Supported JSON shapes:
 {"action":"assign_linear_issue","issue_id":"ANT-147","assignee":"akshat@anthias.xyz"}
 {"action":"list_todays_meetings"}
 {"action":"find_free_slots","day":"2026-04-13","duration_minutes":60}
+{"action":"answer_meeting_question","query":"...","top_k":3}
 Rules:
 - Only return JSON.
 - The start value must always include a timezone offset.
@@ -130,6 +140,7 @@ Rules:
 - For "my issues" in Linear, use action "list_my_linear_assigned_issues".
 - For "list issues in ORG" use action "list_linear_issues" and extract the team key.
 - For "create a linear issue" use action "create_linear_issue".
+- Treat "task" as the same as a Linear issue.
 - For "move ANT-147 to In Progress" or "change ANT-147 to Done" use action "update_linear_issue_state".
 - For "show linear projects" use action "list_linear_projects".
 - For "show linear labels" use action "list_linear_labels".
@@ -139,6 +150,7 @@ Rules:
 - For "assign ANT-147 to Akshat" use action "assign_linear_issue".
 - For "list today's meetings" use action "list_todays_meetings".
 - For "find free slots today" use action "find_free_slots".
+- For questions about past meeting notes, decisions, action items, attendees, meeting summaries, or open questions, use action "answer_meeting_question".
 - If limit is not specified for Linear list actions, use 20.
 - If any required field is missing or ambiguous, return:
 {"action":"needs_clarification","question":"..."}
@@ -187,6 +199,19 @@ def get_confirmation_markup(action_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+async def send_text_with_retry(message, text: str, retries: int = 2) -> None:
+    chunks = [text[index:index + 3500] for index in range(0, len(text), 3500)] or [""]
+    for chunk in chunks:
+        for attempt in range(retries + 1):
+            try:
+                await message.reply_text(chunk)
+                break
+            except (TimedOut, NetworkError):
+                if attempt >= retries:
+                    raise
+                await asyncio.sleep(1 + attempt)
 
 
 def get_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None) -> str:
@@ -259,7 +284,7 @@ def load_config() -> BotConfig:
 
 def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{get_google_generative_language_base_url()}/models/"
         f"{config.gemini_model}:generateContent?key={config.gemini_api_key}"
     )
     payload = {
@@ -315,7 +340,7 @@ def extract_openai_text(payload: dict) -> str:
 
 def call_openai_for_action(config: BotConfig, user_message: str) -> dict:
     response = requests.post(
-        "https://api.openai.com/v1/responses",
+        f"{get_openai_base_url()}/responses",
         headers={
             "Authorization": f"Bearer {config.openai_api_key}",
             "Content-Type": "application/json",
@@ -361,6 +386,10 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
     text = user_message.strip()
     lowered = text.lower()
 
+    meeting_question = parse_meeting_question(text)
+    if meeting_question:
+        return meeting_question
+
     if any(phrase in lowered for phrase in ["today's meetings", "todays meetings", "list today's meetings", "list todays meetings"]):
         return {"action": "list_todays_meetings"}
 
@@ -387,6 +416,8 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
         "linear" not in lowered
         and "issue" not in lowered
         and "issues" not in lowered
+        and "task" not in lowered
+        and "tasks" not in lowered
         and "org" not in lowered
         and not has_linear_signal
     ):
@@ -479,15 +510,18 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
                 "project_name": project_match.group(1).strip().strip('"').strip("'"),
             }
 
-    if "create" in lowered and "issue" in lowered:
+    if "create" in lowered and ("issue" in lowered or "task" in lowered):
         title_match = (
             re.search(r'\b(?:heading|title)\s+"([^"]+)"', text, re.IGNORECASE)
             or re.search(r"\b(?:heading|title)\s+'([^']+)'", text, re.IGNORECASE)
             or re.search(r"\b(?:heading|title)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
             or re.search(r"\bissue\s+(?:called|named)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
+            or re.search(r"\btask\s+(?:called|named)\s+(.+?)(?:\s+and\s+|\s+description\s+|$)", text, re.IGNORECASE)
         )
         description_match = re.search(r"\bdescription\s+(.+)$", text, re.IGNORECASE)
         assign_to_me = "assign it to me" in lowered or "assign to me" in lowered or "for me" in lowered
+        assignee_match = re.search(r"\bassign(?:\s+it)?\s+to\s+(.+?)(?:\s+and\s+|\s+with\s+|\s+in\s+|\s+state\s+|$)", text, re.IGNORECASE)
+        explicit_state = next((canonical for alias, canonical in LINEAR_STATE_ALIASES.items() if alias in lowered), "")
         if team_key and title_match:
             return {
                 "action": "create_linear_issue",
@@ -495,6 +529,8 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
                 "title": title_match.group(1).strip().strip('"').strip("'"),
                 "description": description_match.group(1).strip() if description_match else "",
                 "assign_to_me": assign_to_me,
+                "assignee": assignee_match.group(1).strip().strip('"').strip("'") if assignee_match else "",
+                "state_name": explicit_state,
             }
         return {
             "action": "needs_clarification",
@@ -530,6 +566,33 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
                 "state_filters": state_filters,
                 "only_mine": only_mine,
             }
+
+    return None
+
+
+def parse_meeting_question(user_message: str) -> dict | None:
+    text = user_message.strip()
+    lowered = text.lower()
+    prefixes = [
+        "ask meetings",
+        "ask meeting",
+        "meeting question",
+        "meeting knowledge",
+        "from meetings",
+        "from meeting notes",
+    ]
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            query = text[len(prefix):].strip(" :-")
+            if query:
+                return {"action": "answer_meeting_question", "query": query, "top_k": 3}
+            return {
+                "action": "needs_clarification",
+                "question": "What would you like me to answer from the meeting records?",
+            }
+
+    if any(phrase in lowered for phrase in ["meeting notes", "past meetings", "meeting records"]):
+        return {"action": "answer_meeting_question", "query": text, "top_k": 3}
 
     return None
 
@@ -591,6 +654,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("This bot is not authorized for this chat.")
         return
     await update.effective_message.reply_text(HELP_TEXT)
+
+
+async def ask_meetings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.effective_message.reply_text("Usage: /askmeetings what did we decide about monitoring?")
+        return
+
+    try:
+        result = answer_from_meeting_context(query, top_k=3)
+        await send_text_with_retry(update.effective_message, format_user_rag_answer(result))
+    except Exception as exc:
+        logger.exception("Failed to answer meeting question")
+        await send_text_with_retry(update.effective_message, f"Could not answer from meeting records yet: {exc}")
 
 
 async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -862,7 +944,16 @@ def build_confirmation_text(spec: dict) -> str:
             f"Attendees: {', '.join(payload['attendees'])}"
         )
     if action == "create_linear_issue":
-        return f"Confirm Linear issue creation?\nTeam: {payload['team_key']}\nTitle: {payload['title']}"
+        lines = [
+            "Confirm Linear issue creation?",
+            f"Team: {payload['team_key']}",
+            f"Title: {payload['title']}",
+        ]
+        if payload.get("assignee"):
+            lines.append(f"Assignee: {payload['assignee']}")
+        if payload.get("state_name"):
+            lines.append(f"State: {payload['state_name']}")
+        return "\n".join(lines)
     if action == "update_linear_issue_state":
         return f"Confirm moving {payload['issue_id']} to {payload['state_name']}?"
     if action in {"update_linear_issue_labels", "add_linear_issue_labels", "remove_linear_issue_labels"}:
@@ -901,12 +992,21 @@ async def execute_pending_action(context: ContextTypes.DEFAULT_TYPE, chat_id: in
     if action == "create_linear_issue":
         team = get_linear_team_by_key(payload["team_key"])
         viewer = get_linear_viewer()
+        assignee_id = None
+        if payload.get("assign_to_me"):
+            assignee_id = viewer["id"]
+        elif payload.get("assignee"):
+            assignee_contact = find_contact(payload["assignee"])
+            assignee_token = assignee_contact["email"] if assignee_contact else payload["assignee"]
+            assignee_id = get_linear_user_by_name_or_email(assignee_token)["id"]
         issue = create_linear_issue(
             team_id=team["id"],
             title=payload["title"],
             description=payload.get("description", ""),
-            assignee_id=viewer["id"] if payload.get("assign_to_me") else None,
+            assignee_id=assignee_id,
         )
+        if payload.get("state_name"):
+            issue = update_linear_issue_state(issue_id=issue["identifier"], state_name=payload["state_name"])
         set_last_linear_issue_id(context, chat_id, issue["identifier"])
         return f"Created Linear issue {issue['identifier']} in {team['key']}.\nTitle: {issue['title']}\nLink: {issue['url']}"
     if action == "update_linear_issue_state":
@@ -954,6 +1054,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 update.effective_chat.id if update.effective_chat else None,
             ),
         ) or call_ai_for_action(config, message.text)
+        if not isinstance(parsed, dict):
+            raise ValueError(f"AI returned an unexpected shape: {type(parsed).__name__}. Expected a JSON object.")
         action = parsed.get("action")
 
         if action == "needs_clarification":
@@ -1009,6 +1111,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 for slot in slots:
                     lines.append(f"- {slot['start']} -> {slot['end']}")
                 await message.reply_text("\n".join(lines))
+            return
+
+        if action == "answer_meeting_question":
+            query = parsed.get("query") or message.text
+            result = answer_from_meeting_context(query, top_k=int(parsed.get("top_k", 3)))
+            await send_text_with_retry(message, format_user_rag_answer(result))
             return
 
         if action == "list_linear_orgs":
@@ -1190,6 +1298,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("askmeetings", ask_meetings_command))
     application.add_handler(CommandHandler("members", members_command))
     application.add_handler(CommandHandler("groups", groups_command))
     application.add_handler(CommandHandler("showmember", show_member_command))
