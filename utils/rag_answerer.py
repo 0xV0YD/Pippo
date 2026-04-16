@@ -5,6 +5,7 @@ from dotenv import load_dotenv
 
 from utils.api_config import get_google_generative_language_base_url
 from utils.embedding_client import get_gemini_api_key
+from utils.meeting_indexer import ensure_meeting_knowledge_current
 from utils.meeting_retriever import retrieve_meeting_chunks
 
 
@@ -37,6 +38,7 @@ def build_meeting_context(chunks: list[dict]) -> str:
 
 
 def answer_from_meeting_context(query: str, top_k: int = 3) -> dict:
+    refresh_actions = ensure_meeting_knowledge_current()
     retrieved_chunks = retrieve_meeting_chunks(query, top_k=top_k)
     context = build_meeting_context(retrieved_chunks)
     model = get_answer_model()
@@ -93,6 +95,7 @@ User question:
         "query": query,
         "answer": answer,
         "sources": retrieved_chunks,
+        "refresh_actions": refresh_actions,
     }
 
 

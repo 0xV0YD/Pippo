@@ -1,36 +1,11 @@
-import json
-from pathlib import Path
-
 import _bootstrap  # noqa: F401
 
-from utils.embedding_client import embed_texts, get_embedding_model, save_json
-
-
-MEETING_CHUNKS_FILE = Path(__file__).resolve().parent.parent / "data" / "meeting_chunks.json"
-MEETING_EMBEDDINGS_FILE = Path(__file__).resolve().parent.parent / "data" / "meeting_embeddings.json"
-
-
-def load_meeting_chunks() -> list[dict]:
-    return json.loads(MEETING_CHUNKS_FILE.read_text(encoding="utf-8"))
+from utils.embedding_client import save_json
+from utils.meeting_indexer import MEETING_EMBEDDINGS_FILE, build_meeting_embeddings_from_chunks
 
 
 def build_meeting_embeddings() -> list[dict]:
-    chunks = load_meeting_chunks()
-    texts = [chunk["text"] for chunk in chunks]
-    vectors = embed_texts(texts, task_type="RETRIEVAL_DOCUMENT")
-    model = get_embedding_model()
-
-    embedded_chunks = []
-    for chunk, vector in zip(chunks, vectors, strict=True):
-        embedded_chunks.append(
-            {
-                **chunk,
-                "embedding_model": model,
-                "embedding_dimensions": len(vector),
-                "embedding": vector,
-            }
-        )
-    return embedded_chunks
+    return build_meeting_embeddings_from_chunks()
 
 
 def main() -> None:
