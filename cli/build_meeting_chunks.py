@@ -1,3 +1,5 @@
+import _bootstrap  # noqa: F401
+
 from utils.meeting_chunker import build_meeting_chunks, load_meeting_records, save_meeting_chunks
 
 

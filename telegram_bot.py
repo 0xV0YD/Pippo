@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -8,6 +9,7 @@ from datetime import datetime
 import requests
 from dotenv import load_dotenv
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.error import NetworkError, TimedOut
 from telegram.ext import (
     Application,
     CallbackQueryHandler,
@@ -17,6 +19,7 @@ from telegram.ext import (
     filters,
 )
 
+from utils.api_config import get_google_generative_language_base_url, get_openai_base_url
 from utils.calendar_client import (
     create_google_calendar_event,
     find_google_calendar_free_slots,
@@ -54,6 +57,7 @@ from utils.linear_client import (
     update_linear_issue_project,
     update_linear_issue_state,
 )
+from utils.rag_answerer import answer_from_meeting_context, format_user_rag_answer
 
 
 logging.basicConfig(
@@ -77,6 +81,10 @@ Calendar
 - find free slots today
 - find free slots on 2026-04-14 for 30 minutes
 - schedule a sync with infra tomorrow at 4pm IST named Infra Sync
+
+Meeting knowledge
+- /askmeetings what did we decide about monitoring?
+- ask meetings what are the open questions from product review?
 
 Members and groups
 - /members
@@ -123,6 +131,7 @@ Supported JSON shapes:
 {"action":"assign_linear_issue","issue_id":"ANT-147","assignee":"akshat@anthias.xyz"}
 {"action":"list_todays_meetings"}
 {"action":"find_free_slots","day":"2026-04-13","duration_minutes":60}
+{"action":"answer_meeting_question","query":"...","top_k":3}
 Rules:
 - Only return JSON.
 - The start value must always include a timezone offset.
@@ -141,6 +150,7 @@ Rules:
 - For "assign ANT-147 to Akshat" use action "assign_linear_issue".
 - For "list today's meetings" use action "list_todays_meetings".
 - For "find free slots today" use action "find_free_slots".
+- For questions about past meeting notes, decisions, action items, attendees, meeting summaries, or open questions, use action "answer_meeting_question".
 - If limit is not specified for Linear list actions, use 20.
 - If any required field is missing or ambiguous, return:
 {"action":"needs_clarification","question":"..."}
@@ -189,6 +199,19 @@ def get_confirmation_markup(action_id: str) -> InlineKeyboardMarkup:
             ]
         ]
     )
+
+
+async def send_text_with_retry(message, text: str, retries: int = 2) -> None:
+    chunks = [text[index:index + 3500] for index in range(0, len(text), 3500)] or [""]
+    for chunk in chunks:
+        for attempt in range(retries + 1):
+            try:
+                await message.reply_text(chunk)
+                break
+            except (TimedOut, NetworkError):
+                if attempt >= retries:
+                    raise
+                await asyncio.sleep(1 + attempt)
 
 
 def get_selected_account(context: ContextTypes.DEFAULT_TYPE, chat_id: int | None) -> str:
@@ -261,7 +284,7 @@ def load_config() -> BotConfig:
 
 def call_gemini_for_action(config: BotConfig, user_message: str) -> dict:
     url = (
-        "https://generativelanguage.googleapis.com/v1beta/models/"
+        f"{get_google_generative_language_base_url()}/models/"
         f"{config.gemini_model}:generateContent?key={config.gemini_api_key}"
     )
     payload = {
@@ -317,7 +340,7 @@ def extract_openai_text(payload: dict) -> str:
 
 def call_openai_for_action(config: BotConfig, user_message: str) -> dict:
     response = requests.post(
-        "https://api.openai.com/v1/responses",
+        f"{get_openai_base_url()}/responses",
         headers={
             "Authorization": f"Bearer {config.openai_api_key}",
             "Content-Type": "application/json",
@@ -362,6 +385,10 @@ def call_ai_for_action(config: BotConfig, user_message: str) -> dict:
 def parse_linear_filters(user_message: str, last_issue_id: str | None = None) -> dict | None:
     text = user_message.strip()
     lowered = text.lower()
+
+    meeting_question = parse_meeting_question(text)
+    if meeting_question:
+        return meeting_question
 
     if any(phrase in lowered for phrase in ["today's meetings", "todays meetings", "list today's meetings", "list todays meetings"]):
         return {"action": "list_todays_meetings"}
@@ -543,6 +570,33 @@ def parse_linear_filters(user_message: str, last_issue_id: str | None = None) ->
     return None
 
 
+def parse_meeting_question(user_message: str) -> dict | None:
+    text = user_message.strip()
+    lowered = text.lower()
+    prefixes = [
+        "ask meetings",
+        "ask meeting",
+        "meeting question",
+        "meeting knowledge",
+        "from meetings",
+        "from meeting notes",
+    ]
+    for prefix in prefixes:
+        if lowered.startswith(prefix):
+            query = text[len(prefix):].strip(" :-")
+            if query:
+                return {"action": "answer_meeting_question", "query": query, "top_k": 3}
+            return {
+                "action": "needs_clarification",
+                "question": "What would you like me to answer from the meeting records?",
+            }
+
+    if any(phrase in lowered for phrase in ["meeting notes", "past meetings", "meeting records"]):
+        return {"action": "answer_meeting_question", "query": text, "top_k": 3}
+
+    return None
+
+
 def ensure_authorized(update: Update, config: BotConfig) -> bool:
     chat = update.effective_chat
     user = update.effective_user
@@ -600,6 +654,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await update.effective_message.reply_text("This bot is not authorized for this chat.")
         return
     await update.effective_message.reply_text(HELP_TEXT)
+
+
+async def ask_meetings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    config: BotConfig = context.application.bot_data["config"]
+    if not ensure_authorized(update, config):
+        await update.effective_message.reply_text("This bot is not authorized for this chat.")
+        return
+
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.effective_message.reply_text("Usage: /askmeetings what did we decide about monitoring?")
+        return
+
+    try:
+        result = answer_from_meeting_context(query, top_k=3)
+        await send_text_with_retry(update.effective_message, format_user_rag_answer(result))
+    except Exception as exc:
+        logger.exception("Failed to answer meeting question")
+        await send_text_with_retry(update.effective_message, f"Could not answer from meeting records yet: {exc}")
 
 
 async def members_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1040,6 +1113,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 await message.reply_text("\n".join(lines))
             return
 
+        if action == "answer_meeting_question":
+            query = parsed.get("query") or message.text
+            result = answer_from_meeting_context(query, top_k=int(parsed.get("top_k", 3)))
+            await send_text_with_retry(message, format_user_rag_answer(result))
+            return
+
         if action == "list_linear_orgs":
             viewer = get_linear_viewer()
             teams = list_linear_teams()
@@ -1219,6 +1298,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("askmeetings", ask_meetings_command))
     application.add_handler(CommandHandler("members", members_command))
     application.add_handler(CommandHandler("groups", groups_command))
     application.add_handler(CommandHandler("showmember", show_member_command))
